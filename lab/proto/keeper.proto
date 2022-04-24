@@ -1,0 +1,7 @@
+// DO NOT MODIFY
+syntax = "proto3";
+
+// DO NOT MODIFY
+package keeper;
+
+// Add your message and service definitions below this line

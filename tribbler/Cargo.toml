@@ -1,0 +1,22 @@
+[package]
+name = "tribbler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1.53"
+log = "0.4"
+prost = "0.9"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = "0.6"
+local-ip-address = "0.4.4"
+
+
+[build-dependencies]
+tonic-build = { version = "0.6", features = ["rustfmt"] }
+
+
