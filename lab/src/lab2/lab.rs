@@ -1,3 +1,4 @@
+use crate::lab2::{bin_client::BinClient, keeper_server::KeeperServer, trib_front::TribFront};
 use tribbler::{config::KeeperConfig, err::TribResult, storage::BinStorage, trib::Server};
 
 /// This function accepts a list of backend addresses, and returns a
@@ -5,7 +6,7 @@ use tribbler::{config::KeeperConfig, err::TribResult, storage::BinStorage, trib:
 /// underlying storage system.
 #[allow(unused_variables)]
 pub async fn new_bin_client(backs: Vec<String>) -> TribResult<Box<dyn BinStorage>> {
-    todo!()
+    Ok(Box::new(BinClient::new(backs)))
 }
 
 /// this async function accepts a [KeeperConfig] that should be used to start
@@ -16,7 +17,19 @@ pub async fn new_bin_client(backs: Vec<String>) -> TribResult<Box<dyn BinStorage
 /// started.
 #[allow(unused_variables)]
 pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
-    todo!()
+    // DEBUGGING TODO
+    let back_addrs = kc.backs.clone();
+    println!("[DEBUG] lab2 serve_keeper: Config is: {:?}", kc);
+
+    let mut keeper = KeeperServer::new(kc).await?;
+    match keeper.serve().await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            println!("[DEBUG] lab2 serve_keeper error: {}", e.to_string());
+            Err(e)
+        }
+    }
+    // Ok(keeper.serve().await?)
 }
 
 /// this function accepts a [BinStorage] client which should be used in order to
@@ -32,5 +45,5 @@ pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
 pub async fn new_front(
     bin_storage: Box<dyn BinStorage>,
 ) -> TribResult<Box<dyn Server + Send + Sync>> {
-    todo!()
+    Ok(Box::new(TribFront::new(bin_storage)))
 }

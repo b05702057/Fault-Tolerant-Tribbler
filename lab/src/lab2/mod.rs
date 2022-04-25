@@ -227,7 +227,7 @@
 //!  3. If tribble A is posted after a user client sees tribble B, A always
 //!     shows after B.
 //!
-//! A is *posted after* B means A calls `post()` after B's `post()` has
+//! A is *posted after* B means B calls `post()` after A's `post()` has
 //! returned.
 //!
 //! The function returns error when the user does not exist.
@@ -332,6 +332,19 @@
 //! the bin storage service, it may understand how a bin storage client
 //! translates keys. It should NOT rely on anything specific to Tribbler.
 //!
+//! You get to define the RPC interface that is used between the keeper and the
+//! backend storage. Use protobuf syntax to define the messages and RPC methods
+//! that your storage system will use. Refer to the [protobuf language
+//! guide](https://developers.google.com/protocol-buffers/docs/proto3) for
+//! information on how to write protobuf specifications. You can also reference
+//! the `tribbler/proto/rpc.proto` file to see how the storage RPC interface is
+//! specified.
+//!
+//! A blank `proto` file is provided to you in `lab/proto/keeper.proto`. When
+//! building your project with `cargo build` this proto file will get compiled
+//! into the `lab/src/keeper.rs` module, which you can then use to implement
+//! your RPCs
+//!
 //! ---
 //!
 //! ```rust
@@ -356,7 +369,7 @@
 //! your Tribbler front-end should be perfectly happy (and none the wiser). In
 //! particular, this means that you cannot rely on the bin storage keeper to
 //! perform Tribbler related tasks. A front-ends may spawn additional background
-//! tasks if additional work is required by your implementation.
+//! go routines if additional work is required by your implementation.
 //!
 //! ## Putting the pieces together
 //!
@@ -410,23 +423,23 @@
 //!
 //! ```
 //! $ bins-client
-//! (now working on bin "")
+//! (working on bin "")
 //! > bin a
-//! (now working on bin "a")
+//! (working on bin "a")
 //! > get a
-//! Ok(None)
+//!
 //! > set a b
-//! Ok(true)
+//! true
 //! > get a
-//! Ok(Some("b"))
+//! b
 //! > bin t
-//! (now working on bin "t")
-//! > get a
-//! Ok(None)
+//! (working on bin "t")
+//! > get a b
+//!
 //! > bin a
-//! (now working on bin "a")
-//! > get a
-//! Ok(Some("b"))
+//! (working on bin "a")
+//! > get a b
+//! b
 //! ...
 //! ```
 //!
@@ -479,7 +492,6 @@
 //!   because it needs to scan over all the keys.
 //! - Although the Tribbler front-ends can be killed at any time, the killing
 //!   won't happen very often (less than once per second).
-//! - All addresses passed to the keeper and backends will be valid network addresses
 //!
 //! Again, some of these assumptions won't stay true for Lab 3, so try to avoid
 //! relying on these assumptions if possible.
@@ -593,3 +605,7 @@ mod lab;
 pub use crate::lab2::lab::new_bin_client;
 pub use crate::lab2::lab::new_front;
 pub use crate::lab2::lab::serve_keeper;
+mod bin_client;
+mod keeper_server;
+mod storage_structs;
+mod trib_front;

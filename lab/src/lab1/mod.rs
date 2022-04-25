@@ -106,7 +106,7 @@
 //!     /// Gets a value. If no value set, return [None]
 //!     async fn get(&self, key: &str) -> TribResult<Option<String>>;
 //!
-//!     /// Set kv.key to kv.value. return true when no error.
+//!     /// Set kv.Key to kv.Value. return true when no error.
 //!     async fn set(&self, kv: &KeyValue) -> TribResult<bool>;
 //!
 //!     /// List all the keys of non-empty pairs where the key matches
@@ -142,12 +142,12 @@
 //! }
 //! ```
 //!
-//! The [Storage](tribbler::storage::Storage) interface glues these two
-//! interfaces together, and also includes an auto-incrementing clock feature.
+//! The `Storage` interface glues these two interfaces together, and also
+//! includes an auto-incrementing clock feature.
 //!
 //! ```rust
 //! #[async_trait]
-//! pub trait Storage: KeyString + KeyList + Send + Sync {
+//! pub trait Storage: KeyString + KeyList {
 //!     /// Returns an auto-incrementing clock. The returned value of each call will
 //!     /// be unique, no smaller than `at_least`, and strictly larger than the
 //!     /// value returned last time, unless it was [u64::MAX]
@@ -170,20 +170,18 @@
 //!
 //! ## Rust and Async
 //!
-//! Rust has this neat keyword called `async`. Function scopes can be marked as
-//! async which allows you to use a special keyword called `.await` within them.
-//! Using `.await` on an async function an executor (from a crate like [tokio])
-//! to drive the computation to completion. This is especially great for
-//! functions which need to do some kind of IO. Return values of async functions
-//! are implicitly wrapped by a [Future](std::future::Future). Calling `.await`
-//! on a future will retrieve its value.
+//! Rust has this neat keyword concept called `async`. Function scopes can be
+//! marked as async which allows you to use a special keyword called `.await`.
+//! Using `.await` on a function which returns a future utilizes an executor
+//! (from a crate like [tokio]) to drive the IO to completion. Async functions
+//! are implicitly wrapped by a [std::future::Future]. Calling `.await` on the
+//! future will retrieve its value.
 //!
 //! ```rust
 //! async fn do_io() -> bool {
 //!     println!("look ma! I'm doin' I/O!");
 //!     true
 //! }
-//!
 //! #[tokio::main]
 //! async fn main() {
 //!     let fute = do_io(); // type: Future<Output = bool>;
@@ -194,19 +192,17 @@
 //!
 //! This might sound and look confusing, but you don't need to understand the
 //! internals of how this happens. Just understand that if you see `async fn`,
-//! you can call `.await` on other `async fn` inside of it. There's [an entirely
-//! separate book for async
+//! you can call `.await` inside of it. There's [an entirely separate book for
+//! async
 //! Rust](https://rust-lang.github.io/async-book/01_getting_started/01_chapter.html).
 //! You can read this if you want to understand more.
 //!
-//! Lastly, there's one more note about `async` in Rust. Currently, the async
-//! language features are still in their infancy. A consequence of this is that
-//! the compiler doesn't support `async` in trait definitions. However, a
-//! [special crate](async_trait) supplying the `#[async_trait::async_trait]`
-//! annotation allows you to use `async` on trait functions through some
-//! syntactic sugar and tricky macros. You should use it when implementing parts
-//! of the lab.
-//!
+//! Lastly, there's one more note about `async` in Rust. Currently, the language
+//! is still partially in its infancy, especially the async features. The
+//! compiler doesn't support `async` in trait functions, however, a [special
+//! crate](async_trait) supplying the `#[async_trait::async_trait]` annotation
+//! allows this through some syntactic sugar and tricky macros. You'll need to
+//! use it when implementing parts of the lab.
 //!
 //! ## Entry Functions
 //!
@@ -344,11 +340,8 @@
 //! function:
 //!
 //! ```rust
-//! use async_trait::async_trait;
-//!
-//! #[async_trait] // VERY IMPORTANT !!
 //! impl KeyString for StorageClient {
-//!     async fn get(&self, key: &str) -> TribResult<Option<String>> {
+//!     fn get(&self, key: &str) -> TribResult<Option<String>> {
 //!         todo!()
 //!     }
 //! }
@@ -394,26 +387,32 @@
 //!
 //! and then implement the methods on the
 //! [tribbler::rpc::trib_storage_client::TribStorageClient] RPC client service
-//! stub. The examples in the [tonic] documentation show how to write the basic RPC
-//! client logic.
+//! stub.
+//!
+//! The examples in the [tonic] documentation show how to write the basic RPC
+//! client logic. However, most examples assume that we use an async runtime.
+//! The interface given does not use the `async` keyword, so you need to make
+//! sure these calls are blocking. You can use the [tokio] crate which is
+//! responsible for managing async runtimes that handle executing the `async`
+//! functions.
 //!
 //! Following their example, you could create a `get()` method that looks
 //! something like this (though you shouldn't be connecting a new `client` on
 //! every RPC):
 //!
 //! ```rust
-//! use async_trait::async_trait;
 //! use tribbler::rpc::trib_storage_client::TribStorageClient;
-//!
 //! #[async_trait] // VERY IMPORTANT !!
-//! impl KeyString for StorageClient {
+//! impl KeyString for ClientStorage {
 //!     async fn get(&self, key: &str) -> TribResult<Option<String>> {
 //!         let mut client = TribStorageClient::connect(self.addr.clone()).await?;
 //!         let r = client.get(Key {
 //!             key: key.to_string(),
 //!         }).await?;
-//!         Ok(Some(r.into_inner().value))
-//!     }
+//!         match r.into_inner().value {
+//!             value => Ok(Some(value)),
+//!         }
+//!      }
 //!   ...
 //! }
 //! ```
@@ -432,12 +431,13 @@
 //! in the [serve_back] function using the same [tribbler::rpc] module. This
 //! should be similar to the examples in the `tonic` documentation. You do this
 //! by creating a new struct for the RPC server, and implementing the the
-//! [TribStorage](tribbler::rpc::trib_storage_server::TribStorage) trait for the
-//! server side. You should write a new struct which implements this trait. Just
-//! remember that you need to send a `true` over the `ready`
-//! [channel](std::sync::mpsc::channel) when the service is ready (when `ready`
-//! is not `None`), and send a `false` when you encounter any error on starting
-//! your service. The `shutdown` signal also needs to be handled similarly.
+//! `TribStorage` interface for the server side (from
+//! [tribbler::rpc::trib_storage_server::TribStorage]). You should write a new
+//! struct which implements this interface. Just remember that you need to send
+//! a `true` over the `ready` [channel](std::sync::mpsc::channel) when the
+//! service is ready (when `ready` is not `None`), and send a `false` when you
+//! encounter any error on starting your service. The `shutdown` signal also
+//! needs to be handled.
 //!
 //! When all of these changes are done, you should pass the test cases written
 //! in the `lab1_test.rs` file. It performs some basic checks to see if an RPC
@@ -459,7 +459,7 @@
 //!
 //! ```rust
 //! // StorageServer is a type you can define in your lab
-//! impl rpc::trib_storage_server::TribStorage for StorageServer {
+//! impl KeyString for StorageServer {
 //!     fn set<'life0, 'async_trait>(
 //!         &'life0 self,
 //!         request: tonic::Request<rpc::KeyValue>,
@@ -476,7 +476,7 @@
 //!     {
 //!         todo!()
 //!     }
-//!     // ... more method implementations below
+//!     //... more implementations below
 //! }
 //! ```
 //!
@@ -490,7 +490,7 @@
 //!
 //! ```
 //! #[async_trait::async_trait]
-//! impl rpc::trib_storage_server::TribStorage for StorageServer {
+//! impl KeyString for StorageServer {
 //!     async fn set(&self, request: tonic::Request<rpc::KeyValue>,
 //!     ) -> Result<tonic::Response<rpc::Bool>, tonic::Status> {
 //!         todo!();
@@ -511,7 +511,7 @@
 //! $ cargo run --bin kv-server
 //! ```
 //!
-//! You should see an address print out (e.g. `127.0.0.1:7799`). If desired, you
+//! You should see an address print out (e.g. `localhost:7799`). If desired, you
 //! can override this setting with a command line flag.
 //!
 //! Now you can play with your server via the `kv-client` program. For example:
@@ -566,3 +566,5 @@
 mod lab;
 pub use crate::lab1::lab::new_client;
 pub use crate::lab1::lab::serve_back;
+mod client;
+mod server;
