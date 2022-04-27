@@ -57,7 +57,7 @@ impl BinStorage for BinClient {
 // Struct that wraps lab1's client Storage RPCs into those that accepts bin
 // name as prefix of the key to provide logical separate KV stores per bin.
 pub struct StorageClientMapperWrapper {
-    pub bin_name: String,
+    pub bin_name: String, // assumes already escaped colons
     pub storage_client: Box<dyn Storage>,
 }
 
@@ -65,13 +65,13 @@ pub struct StorageClientMapperWrapper {
 impl KeyString for StorageClientMapperWrapper {
     /// Gets a value. If no value set, return [None]
     async fn get(&self, key: &str) -> TribResult<Option<String>> {
-        let translated_key = format!("{}::{}", self.bin_name, key);
+        let translated_key = format!("{}::{}", self.bin_name, colon::escape(key));
         self.storage_client.get(&translated_key).await
     }
 
     /// Set kv.Key to kv.Value. return true when no error.
     async fn set(&self, kv: &KeyValue) -> TribResult<bool> {
-        let translated_key = format!("{}::{}", self.bin_name, &kv.key);
+        let translated_key = format!("{}::{}", self.bin_name, colon::escape(&kv.key));
         let translated_kv = KeyValue {
             key: translated_key,
             value: kv.value.clone(),
@@ -82,12 +82,33 @@ impl KeyString for StorageClientMapperWrapper {
     /// List all the keys of non-empty pairs where the key matches
     /// the given pattern.
     async fn keys(&self, p: &Pattern) -> TribResult<List> {
-        let translated_prefix = format!("{}::{}", self.bin_name, p.prefix);
+        let bin_name_and_separator_prefix = format!("{}::", self.bin_name);
+        let translated_prefix = format!(
+            "{}{}",
+            bin_name_and_separator_prefix,
+            colon::escape(&p.prefix)
+        );
+
+        let escaped_suffix = colon::escape(&p.suffix);
         let translated_pattern = Pattern {
             prefix: translated_prefix,
-            suffix: p.suffix.clone(),
+            suffix: escaped_suffix,
         };
-        self.storage_client.keys(&translated_pattern).await
+        let keys_vec = self.storage_client.keys(&translated_pattern).await?.0;
+
+        // Strip bin_name_and_separator_prefix and unescape before returning.
+        let prefix_stripped_keys: Vec<String> = keys_vec
+            .into_iter()
+            .map(|prefixed_key| {
+                colon::unescape(
+                    prefixed_key
+                        .get(bin_name_and_separator_prefix.len()..prefixed_key.len())
+                        .unwrap_or("ERROR UNWRAPPING PREFIX STRIPPED KEYS")
+                        .to_string(),
+                )
+            })
+            .collect();
+        Ok(List(prefix_stripped_keys))
     }
 }
 
@@ -95,13 +116,13 @@ impl KeyString for StorageClientMapperWrapper {
 impl KeyList for StorageClientMapperWrapper {
     /// Get the list. Empty if not set.
     async fn list_get(&self, key: &str) -> TribResult<List> {
-        let translated_key = format!("{}::{}", self.bin_name, key);
+        let translated_key = format!("{}::{}", self.bin_name, colon::escape(key));
         self.storage_client.list_get(&translated_key).await
     }
 
     /// Append a string to the list. return true when no error.
     async fn list_append(&self, kv: &KeyValue) -> TribResult<bool> {
-        let translated_key = format!("{}::{}", self.bin_name, &kv.key);
+        let translated_key = format!("{}::{}", self.bin_name, colon::escape(&kv.key));
         let translated_kv = KeyValue {
             key: translated_key,
             value: kv.value.clone(),
@@ -112,7 +133,7 @@ impl KeyList for StorageClientMapperWrapper {
     /// Removes all elements that are equal to `kv.value` in list `kv.key`
     /// returns the number of elements removed.
     async fn list_remove(&self, kv: &KeyValue) -> TribResult<u32> {
-        let translated_key = format!("{}::{}", self.bin_name, &kv.key);
+        let translated_key = format!("{}::{}", self.bin_name, colon::escape(&kv.key));
         let translated_kv = KeyValue {
             key: translated_key,
             value: kv.value.clone(),
@@ -123,12 +144,33 @@ impl KeyList for StorageClientMapperWrapper {
     /// List all the keys of non-empty lists, where the key matches
     /// the given pattern.
     async fn list_keys(&self, p: &Pattern) -> TribResult<List> {
-        let translated_prefix = format!("{}::{}", self.bin_name, p.prefix);
+        let bin_name_and_separator_prefix = format!("{}::", self.bin_name);
+        let translated_prefix = format!(
+            "{}{}",
+            bin_name_and_separator_prefix,
+            colon::escape(&p.prefix)
+        );
+
+        let escaped_suffix = colon::escape(&p.suffix);
         let translated_pattern = Pattern {
             prefix: translated_prefix,
-            suffix: p.suffix.clone(),
+            suffix: escaped_suffix,
         };
-        self.storage_client.list_keys(&translated_pattern).await
+        let keys_vec = self.storage_client.list_keys(&translated_pattern).await?.0;
+
+        // Strip bin_name_and_separator_prefix and unescape before returning.
+        let prefix_stripped_keys: Vec<String> = keys_vec
+            .into_iter()
+            .map(|prefixed_key| {
+                colon::unescape(
+                    prefixed_key
+                        .get(bin_name_and_separator_prefix.len()..prefixed_key.len())
+                        .unwrap_or("ERROR UNWRAPPING PREFIX STRIPPED KEYS")
+                        .to_string(),
+                )
+            })
+            .collect();
+        Ok(List(prefix_stripped_keys))
     }
 }
 
