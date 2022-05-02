@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use tribbler::{
     err::TribResult,
@@ -17,13 +17,13 @@ pub struct StorageClient {
     // Arc wrapping is not necessary for single thread but needed for multiple threads.
     // Since the tests in lab1_test.rs are multi-threaded, to be safe use Arc wrapping. Thus, clone the client_opt arc before doing
     // reading or placing values into the option.
-    // With Arc wrapping, prefer this when getting mutable borrow: let client = &mut Arc::clone(client_opt).lock_owned().await;
+    // With Arc wrapping, prefer this when getting mutable borrow: let client = &mut Arc::clone(client_opt).read_owned().await;
     // Without Arc wrapping, prefer this when getting mutable borrow: let client = &mut Arc::clone(client_opt).lock().await;
     // Option wrapping is because during initialization of server client_opt can be None until connection is performed
     // ALSO, clone the CLIENT (inside client_opt) for each call, since RPCClient<tonic::transport::Channel> is clonable and works
     // fine with conccurent requests (see https://docs.rs/tonic/latest/tonic/client/index.html and
     // https://docs.rs/tonic/latest/tonic/transport/struct.Channel.html#multiplexing-requests)
-    pub client_opt: Arc<Mutex<Option<TribStorageClient<tonic::transport::Channel>>>>,
+    pub client_opt: Arc<RwLock<Option<TribStorageClient<tonic::transport::Channel>>>>,
 }
 
 impl StorageClient {
@@ -31,13 +31,13 @@ impl StorageClient {
     pub fn new(http_addr: &String) -> StorageClient {
         StorageClient {
             http_addr: http_addr.clone(),
-            client_opt: Arc::new(Mutex::new(None)),
+            client_opt: Arc::new(RwLock::new(None)),
         }
     }
 
     // Connects client if not already connected
     pub async fn connect(&self) -> TribResult<()> {
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).write_owned().await;
         // Only connect if not already connected. There may be races to self.connect() so
         // this prevents unnecessary reconnection.
         if let None = *client_opt {
@@ -53,7 +53,7 @@ impl KeyString for StorageClient {
     /// Gets a value. If no value set, return [None]
     async fn get(&self, key: &str) -> TribResult<Option<String>> {
         // client_opt is an tokio::sync::OwnedMutexGuard
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).read_owned().await;
 
         // If not connected, initialize and connect client
         if let None = *client_opt {
@@ -63,7 +63,7 @@ impl KeyString for StorageClient {
             self.connect().await?;
 
             // Important: reassign client_opt acquiring lock
-            client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+            client_opt = Arc::clone(&self.client_opt).read_owned().await;
         };
 
         // At this point client should be connected
@@ -103,7 +103,7 @@ impl KeyString for StorageClient {
     /// Set kv.Key to kv.Value. return true when no error.
     async fn set(&self, kv: &KeyValue) -> TribResult<bool> {
         // client_opt is an tokio::sync::OwnedMutexGuard
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).read_owned().await;
 
         // If not connected, initialize and connect client
         if let None = *client_opt {
@@ -113,7 +113,7 @@ impl KeyString for StorageClient {
             self.connect().await?;
 
             // Important: reassign client_opt acquiring lock
-            client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+            client_opt = Arc::clone(&self.client_opt).read_owned().await;
         };
 
         // At this point client should be connected
@@ -141,7 +141,7 @@ impl KeyString for StorageClient {
     /// the given pattern.
     async fn keys(&self, p: &Pattern) -> TribResult<List> {
         // client_opt is an tokio::sync::OwnedMutexGuard
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).read_owned().await;
 
         // If not connected, initialize and connect client
         if let None = *client_opt {
@@ -151,7 +151,7 @@ impl KeyString for StorageClient {
             self.connect().await?;
 
             // Important: reassign client_opt acquiring lock
-            client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+            client_opt = Arc::clone(&self.client_opt).read_owned().await;
         };
 
         // At this point client should be connected
@@ -181,7 +181,7 @@ impl KeyList for StorageClient {
     /// Get the list. Empty if not set.
     async fn list_get(&self, key: &str) -> TribResult<List> {
         // client_opt is an tokio::sync::OwnedMutexGuard
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).read_owned().await;
 
         // If not connected, initialize and connect client
         if let None = *client_opt {
@@ -191,7 +191,7 @@ impl KeyList for StorageClient {
             self.connect().await?;
 
             // Important: reassign client_opt acquiring lock
-            client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+            client_opt = Arc::clone(&self.client_opt).read_owned().await;
         };
 
         // At this point client should be connected
@@ -217,7 +217,7 @@ impl KeyList for StorageClient {
     /// Append a string to the list. return true when no error.
     async fn list_append(&self, kv: &KeyValue) -> TribResult<bool> {
         // client_opt is an tokio::sync::OwnedMutexGuard
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).read_owned().await;
 
         // If not connected, initialize and connect client
         if let None = *client_opt {
@@ -227,7 +227,7 @@ impl KeyList for StorageClient {
             self.connect().await?;
 
             // Important: reassign client_opt acquiring lock
-            client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+            client_opt = Arc::clone(&self.client_opt).read_owned().await;
         };
 
         // At this point client should be connected
@@ -255,7 +255,7 @@ impl KeyList for StorageClient {
     /// returns the number of elements removed.
     async fn list_remove(&self, kv: &KeyValue) -> TribResult<u32> {
         // client_opt is an tokio::sync::OwnedMutexGuard
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).read_owned().await;
 
         // If not connected, initialize and connect client
         if let None = *client_opt {
@@ -265,7 +265,7 @@ impl KeyList for StorageClient {
             self.connect().await?;
 
             // Important: reassign client_opt acquiring lock
-            client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+            client_opt = Arc::clone(&self.client_opt).read_owned().await;
         };
 
         // At this point client should be connected
@@ -293,7 +293,7 @@ impl KeyList for StorageClient {
     /// the given pattern.
     async fn list_keys(&self, p: &Pattern) -> TribResult<List> {
         // client_opt is an tokio::sync::OwnedMutexGuard
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).read_owned().await;
 
         // If not connected, initialize and connect client
         if let None = *client_opt {
@@ -303,7 +303,7 @@ impl KeyList for StorageClient {
             self.connect().await?;
 
             // Important: reassign client_opt acquiring lock
-            client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+            client_opt = Arc::clone(&self.client_opt).read_owned().await;
         };
 
         // At this point client should be connected
@@ -335,7 +335,7 @@ impl Storage for StorageClient {
     /// value returned last time, unless it was [u64::MAX]
     async fn clock(&self, at_least: u64) -> TribResult<u64> {
         // client_opt is an tokio::sync::OwnedMutexGuard
-        let mut client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+        let mut client_opt = Arc::clone(&self.client_opt).read_owned().await;
 
         // If not connected, initialize and connect client
         if let None = *client_opt {
@@ -345,7 +345,7 @@ impl Storage for StorageClient {
             self.connect().await?;
 
             // Important: reassign client_opt acquiring lock
-            client_opt = Arc::clone(&self.client_opt).lock_owned().await;
+            client_opt = Arc::clone(&self.client_opt).read_owned().await;
         };
 
         // At this point client should be connected
