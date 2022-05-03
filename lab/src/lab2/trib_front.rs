@@ -3,11 +3,11 @@ use crate::lab2::storage_structs::{
     TribListEntry,
 };
 use async_trait::async_trait;
-use rand::Rng;
-use std::collections::HashSet;
+// use rand::Rng;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::SystemTime;
-use tokio::sync::RwLock;
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::{Mutex, RwLock};
 
 use tribbler::{
     err::{TribResult, TribblerError},
@@ -18,18 +18,19 @@ use tribbler::{
 };
 
 // Garbage collection constants
+const MIN_TRIBS_GC_INTERVAL_PER_USER: Duration = Duration::from_secs(10);
 const TRIBS_GARBAGE_COLLECT_THRESHOLD: usize = MAX_TRIB_FETCH + 5;
-// Use this constant to control the chance of tribs garbage collection (1 in
-// TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance).
-// This is to avoid having all successive posts of a user to constantly do garbage collection
-// of mostly the same outdated keys. Prevents inundation of requests to the user's bin.
-const TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER: usize = 3;
-// Sometimes the user may simply be following many users which leads to long logs, but this may
-// not necessarily have many outdated/unnecessary entries. Thus it is better to require a
-// condition where the following log is greater than the resolved log by some amount for GC.
-const FOLLOWING_LOG_DIFFERENCE_RESOLVED_LOG_GARBAGE_COLLECTION_THRESHOLD: usize = 5;
-// Same idea as for TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER above
-const FOLLOWING_LOG_GARBAGE_COLLECTION_CHANCE_PARAMETER: usize = 3;
+// // Use this constant to control the chance of tribs garbage collection (1 in
+// // TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance).
+// // This is to avoid having all successive posts of a user to constantly do garbage collection
+// // of mostly the same outdated keys. Prevents inundation of requests to the user's bin.
+// const TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER: usize = 3;
+// // Sometimes the user may simply be following many users which leads to long logs, but this may
+// // not necessarily have many outdated/unnecessary entries. Thus it is better to require a
+// // condition where the following log is greater than the resolved log by some amount for GC.
+// const FOLLOWING_LOG_DIFFERENCE_RESOLVED_LOG_GARBAGE_COLLECTION_THRESHOLD: usize = 5;
+// // Same idea as for TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER above
+// const FOLLOWING_LOG_GARBAGE_COLLECTION_CHANCE_PARAMETER: usize = 3;
 
 // String constants for special key, key prefixes, and bin name prefixes.
 // Full keys/names end in "_#", and prefixes end in "_#_"
@@ -249,6 +250,8 @@ pub struct TribFront {
     /// state of all users registered) and thus the front end is still safe
     /// to be killed any time. Hold max of 20.
     cached_sorted_list_users: RwLock<Vec<String>>,
+
+    last_gc_time_map: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 // Helper functions that may be reused
@@ -257,6 +260,7 @@ impl TribFront {
         TribFront {
             bin_storage: bin_storage,
             cached_sorted_list_users: RwLock::new(vec![]),
+            last_gc_time_map: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -434,78 +438,107 @@ impl TribFront {
         Ok(most_recent_trib_entries)
     }
 
-    // // No caller should wait for the results here. Should wrap this in
-    // // a tokio spawn for example to let the task run in the background.
-    // // Check if user's tribs length has reached a threshold for garbage
-    // // collection and if so this function itself will spawn async tasks
-    // // to do key removal of the no longer necessary tribs.
-    // // Note there is only a 1 in TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of
-    // // moving forward to avoid excesscie duplicate garbage collection attempts from
-    // // successive posts by the same user.
-    // async fn garbage_collect_tribs_if_needed(bin_of_user: Box<dyn Storage>) -> TribResult<()> {
-    //     // Fetch the tribs list of the user
-    //     let res_list = bin_of_user.list_get(TRIBS_LIST_KEY).await?;
-    //     let res_vec: Vec<String> = res_list.0; // vec of TribListEntry serialized strings
+    // No caller should wait for the results here. Should wrap this in
+    // a tokio spawn for example to let the task run in the background.
+    // Check if user's tribs length has reached a threshold for garbage
+    // collection and if so this function itself will spawn async tasks
+    // to do key removal of the no longer necessary tribs.
+    // Note there is only a 1 in TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of
+    // moving forward to avoid excesscie duplicate garbage collection attempts from
+    // successive posts by the same user.
+    async fn garbage_collect_tribs_if_needed(
+        user: String,
+        bin_of_user: Box<dyn Storage>,
+        last_gc_time_map_arc: Arc<Mutex<HashMap<String, Instant>>>,
+    ) -> TribResult<()> {
+        // Important, lock is held through decision is made of moving forward with GC or not.
+        // If moving forward, temp last gc time is updated to avoid other concurrent GC functions
+        // to move forward as well
+        let mut last_gc_time_map = last_gc_time_map_arc.lock().await;
+        if let Some(user_last_gc_time) = (*last_gc_time_map).get(&user) {
+            let now = Instant::now();
+            // Don't even attemp GC if last time done was less than a second ago
+            if now.saturating_duration_since(user_last_gc_time.clone())
+                < MIN_TRIBS_GC_INTERVAL_PER_USER
+            {
+                return Ok(());
+            }
+        }
 
-    //     // Only garbage collect if garbage collect length threshold is exceeded
-    //     if res_vec.len() < TRIBS_GARBAGE_COLLECT_THRESHOLD {
-    //         return Ok(());
-    //     }
+        // Fetch the tribs list of the user
+        let res_list = bin_of_user.list_get(TRIBS_LIST_KEY).await?;
+        let res_vec: Vec<String> = res_list.0; // vec of TribListEntry serialized strings
 
-    //     // Only have a 1 in TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of actually doing garbage collection.
-    //     // This prevents quick successive user posts from flooding requests to the same bin to remove
-    //     // mostly the same outdated entries.
-    //     // Also if res_vec.len() is >= 8 + TRIBS_GARBAGE_COLLECT_THRESHOLD, then let the chance be 100%, since
-    //     // we consider that getting way too long.
-    //     if res_vec.len() < 8 + TRIBS_GARBAGE_COLLECT_THRESHOLD {
-    //         let mut rng = rand::thread_rng();
-    //         if rng.gen_range(1..=TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER) > 1 {
-    //             return Ok(()); // return since didnt get selected to move forward with GC.
-    //         }
-    //     }
+        // Only garbage collect if garbage collect length threshold is exceeded
+        if res_vec.len() < TRIBS_GARBAGE_COLLECT_THRESHOLD {
+            return Ok(());
+        }
+        // Since we are moving forward with GC update start GC time so that other races won't GC as well
+        // After GC, we will also update time.
+        last_gc_time_map.insert(user.to_string(), Instant::now());
 
-    //     // Deserialize list and sort in TribListEntry format first (since we didnt define Ord for Trib)
-    //     let deserialized_list_result: Result<Vec<TribListEntry>, _> = res_vec
-    //         .iter()
-    //         .map(|serialized_entry| serde_json::from_str(serialized_entry))
-    //         .collect();
-    //     let mut trib_entries = deserialized_list_result?;
+        // Don't hold lock through actual GC
+        drop(last_gc_time_map);
 
-    //     // Important: Sort based on tribble order
-    //     trib_entries.sort();
+        // If want chanced GC, uncomment here
+        // // Only have a 1 in TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of actually doing garbage collection.
+        // // This prevents quick successive user posts from flooding requests to the same bin to remove
+        // // mostly the same outdated entries.
+        // // Also if res_vec.len() is >= 8 + TRIBS_GARBAGE_COLLECT_THRESHOLD, then let the chance be 100%, since
+        // // we consider that getting way too long.
+        // if res_vec.len() < 8 + TRIBS_GARBAGE_COLLECT_THRESHOLD {
+        //     let mut rng = rand::thread_rng();
+        //     if rng.gen_range(1..=TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER) > 1 {
+        //         return Ok(()); // return since didnt get selected to move forward with GC.
+        //     }
+        // }
 
-    //     // Scale this with how excessive the length is.
-    //     // If trib_entries is getting too long though, choosing absolute trib_entries.len() - TRIBS_GARBAGE_COLLECT_THRESHOLD
-    //     // will help bring it down to exact TRIBS_GARBAGE_COLLECT_THRESHOLD after GC. Ideally we want to be in the first
-    //     // slowly scaling case (trib_entries.len() - MAX_TRIB_FETCH) / 2) being the max which means it would bring the list
-    //     // length down below TRIBS_GARBAGE_COLLECT_THRESHOLD
-    //     let num_entries_to_garbage_collect = std::cmp::max(
-    //         (trib_entries.len() - MAX_TRIB_FETCH) / 2,
-    //         trib_entries.len() - TRIBS_GARBAGE_COLLECT_THRESHOLD,
-    //     );
+        // Deserialize list and sort in TribListEntry format first (since we didnt define Ord for Trib)
+        let deserialized_list_result: Result<Vec<TribListEntry>, _> = res_vec
+            .iter()
+            .map(|serialized_entry| serde_json::from_str(serialized_entry))
+            .collect();
+        let mut trib_entries = deserialized_list_result?;
 
-    //     // Keep only up to NUM_ENTRIES_TO_GARBAGE_COLLECT_AT_A_TIME outdated entries to do garbage collection
-    //     // NUM_ENTRIES_TO_GARBAGE_COLLECT_AT_A_TIME is used to avoid sending too many requests at once.
-    //     trib_entries.truncate(num_entries_to_garbage_collect);
+        // Important: Sort based on tribble order
+        trib_entries.sort();
 
-    //     // To clone and move into tasks
-    //     let bin_of_user_arc = Arc::new(bin_of_user);
+        // Scale this with how excessive the length is.
+        // If trib_entries is getting too long though, choosing absolute trib_entries.len() - TRIBS_GARBAGE_COLLECT_THRESHOLD
+        // will help bring it down to exact TRIBS_GARBAGE_COLLECT_THRESHOLD after GC. Ideally we want to be in the first
+        // slowly scaling case (trib_entries.len() - MAX_TRIB_FETCH) / 2) being the max which means it would bring the list
+        // length down below TRIBS_GARBAGE_COLLECT_THRESHOLD
+        let num_entries_to_garbage_collect = std::cmp::max(
+            (trib_entries.len() - MAX_TRIB_FETCH) / 2,
+            trib_entries.len() - TRIBS_GARBAGE_COLLECT_THRESHOLD,
+        );
 
-    //     // Spawn async tasks to remove outdated entries. Don't wait for result
-    //     for entry_to_gc in trib_entries {
-    //         let bin_of_user_arc_clone = Arc::clone(&bin_of_user_arc);
-    //         tokio::spawn(async move {
-    //             bin_of_user_arc_clone
-    //                 .list_remove(&KeyValue {
-    //                     key: TRIBS_LIST_KEY.to_string(),
-    //                     value: serde_json::to_string(&entry_to_gc)?,
-    //                 })
-    //                 .await
-    //         });
-    //     }
+        // Keep only up to NUM_ENTRIES_TO_GARBAGE_COLLECT_AT_A_TIME outdated entries to do garbage collection
+        // NUM_ENTRIES_TO_GARBAGE_COLLECT_AT_A_TIME is used to avoid sending too many requests at once.
+        trib_entries.truncate(num_entries_to_garbage_collect);
 
-    //     Ok(())
-    // }
+        // To clone and move into tasks
+        let bin_of_user_arc = Arc::new(bin_of_user);
+
+        // Spawn async tasks to remove outdated entries. Don't wait for result
+        for entry_to_gc in trib_entries {
+            let bin_of_user_arc_clone = Arc::clone(&bin_of_user_arc);
+            tokio::spawn(async move {
+                bin_of_user_arc_clone
+                    .list_remove(&KeyValue {
+                        key: TRIBS_LIST_KEY.to_string(),
+                        value: serde_json::to_string(&entry_to_gc)?,
+                    })
+                    .await
+            });
+        }
+
+        // Update last GC time
+        let mut last_gc_time_map = last_gc_time_map_arc.lock().await;
+        last_gc_time_map.insert(user.to_string(), Instant::now());
+
+        Ok(())
+    }
 
     // // Should not need to wait for this function to return. Caller should wrap in a tokio::spawn for example
     // // This can be done in the background. This function itself will spawn more tasks that it does wait for
@@ -761,12 +794,19 @@ impl Server for TribFront {
 
         // From here onwards MUST RETURN SUCCESS
 
-        // // If needed, Garbage collect posts. Spawn async task to do so.
-        // // Note we are not actually waiting for tokio spawn handle to return and don't care
-        // // about results.
-        // tokio::spawn(async move {
-        //     let _ = Self::garbage_collect_tribs_if_needed(bin_of_user).await;
-        // });
+        // If needed, Garbage collect posts. Spawn async task to do so.
+        // Note we are not actually waiting for tokio spawn handle to return and don't care
+        // about results.
+        let last_gc_time_map_arc_clone = Arc::clone(&self.last_gc_time_map);
+        let user_string = who.to_string();
+        tokio::spawn(async move {
+            let _ = Self::garbage_collect_tribs_if_needed(
+                user_string,
+                bin_of_user,
+                last_gc_time_map_arc_clone,
+            )
+            .await;
+        });
 
         Ok(())
     }
