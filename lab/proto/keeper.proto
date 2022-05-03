@@ -5,3 +5,29 @@ syntax = "proto3";
 package keeper;
 
 // Add your message and service definitions below this line
+message Clock {
+    uint64 timestamp = 1;
+}
+
+message LogEntry {
+    uint64 index = 1;
+    string operation = 2;
+}
+
+message BackendStatusList {
+    repeated string addressList = 1;
+    repeated bool statusList = 2;
+}
+
+message Bool {
+    bool value = 1;
+}
+
+message None {
+}
+
+service TribStorage {
+    rpc sendClock(Clock) returns (Bool);
+    rpc sendLogEntry(LogEntry) returns (Bool);
+    rpc getBackendStatusList(None) returns (BackendStatusList);
+}
