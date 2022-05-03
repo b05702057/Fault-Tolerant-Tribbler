@@ -52,7 +52,11 @@ impl StorageClient {
         // Only connect if not already connected. There may be races to self.connect() so
         // this prevents unnecessary reconnection.
         if let None = *client_opt {
-            *client_opt = Some(TribStorageClient::connect(self.http_addr.clone()).await?);
+            // Limit num concurrent requests
+            let endpoint =
+                tonic::transport::channel::Endpoint::from_shared(self.http_addr.clone())?
+                    .concurrency_limit(100);
+            *client_opt = Some(TribStorageClient::connect(endpoint).await?);
         }
 
         Ok(())

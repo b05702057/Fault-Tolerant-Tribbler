@@ -286,31 +286,7 @@ impl TribFront {
 
         let mut evaluated_registered_usernames = vec![];
         for reg_entry in early_reg_log_entries.iter() {
-            match reg_entry.commit_status {
-                EarlyRegistrationStatus::Valid => {
-                    evaluated_registered_usernames.push(reg_entry.username.clone())
-                }
-                EarlyRegistrationStatus::Invalid => (),
-                EarlyRegistrationStatus::Uncertain => {
-                    let bin_of_uncertain_user = self.bin_storage.bin(&reg_entry.username).await?;
-                    if bin_of_uncertain_user.get(USER_EXISTS_KEY).await?
-                        == Some(USER_EXISTS_VALUE.to_string())
-                    {
-                        // If commited, then add to resolved registered list. Then asyncly send update of reg status to reg list
-                        evaluated_registered_usernames.push(reg_entry.username.clone());
-
-                        // Asynchronously update validity in registration list. No need to wait or care if errors
-                        match self.bin_storage.bin(EARLY_REGISTRATION_BIN_NAME).await {
-                            Ok(new_early_reg_bin) => Self::update_registration_entry_validity(
-                                new_early_reg_bin,
-                                &reg_entry.username,
-                                EarlyRegistrationStatus::Valid,
-                            ),
-                            Err(_) => (), // Ignore error
-                        }
-                    }
-                }
-            }
+            evaluated_registered_usernames.push(reg_entry.username.clone());
 
             // NOTE DO NOT BREAK EARLY HERE BASED ON evaluated_registered_usernames.lne() SINCE THERE MAY BE DUPLICATES
         }
@@ -341,35 +317,6 @@ impl TribFront {
         }
 
         Ok(())
-    }
-
-    // Spawns async task to do this.
-    // Note does not return anything. Don't care if successful or not since if EarlyRegistrationStatus
-    // is still Uncertain then someone else can check and update it later
-    fn update_registration_entry_validity(
-        early_reg_bin: Box<dyn Storage>,
-        user: &str,
-        new_reg_status: EarlyRegistrationStatus,
-    ) {
-        // Noone will check the result of this spawn
-        let user_str = user.to_string();
-        tokio::spawn(async move {
-            let updated_reg_entry = EarlyRegistrationLogEntry {
-                username: user_str,
-                commit_status: new_reg_status,
-            };
-            // Don't care about errors
-            let updated_reg_entry_serialized = match serde_json::to_string(&updated_reg_entry) {
-                Ok(val) => val,
-                Err(_) => return,
-            };
-            let _ = early_reg_bin
-                .list_append(&KeyValue {
-                    key: EARLY_REGISTRATION_LOG_KEY.to_string(),
-                    value: updated_reg_entry_serialized,
-                })
-                .await;
-        });
     }
 
     // Retrieve following log from bin and return a deserialized vector of log entries
@@ -487,137 +434,137 @@ impl TribFront {
         Ok(most_recent_trib_entries)
     }
 
-    // No caller should wait for the results here. Should wrap this in
-    // a tokio spawn for example to let the task run in the background.
-    // Check if user's tribs length has reached a threshold for garbage
-    // collection and if so this function itself will spawn async tasks
-    // to do key removal of the no longer necessary tribs.
-    // Note there is only a 1 in TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of
-    // moving forward to avoid excesscie duplicate garbage collection attempts from
-    // successive posts by the same user.
-    async fn garbage_collect_tribs_if_needed(bin_of_user: Box<dyn Storage>) -> TribResult<()> {
-        // Fetch the tribs list of the user
-        let res_list = bin_of_user.list_get(TRIBS_LIST_KEY).await?;
-        let res_vec: Vec<String> = res_list.0; // vec of TribListEntry serialized strings
+    // // No caller should wait for the results here. Should wrap this in
+    // // a tokio spawn for example to let the task run in the background.
+    // // Check if user's tribs length has reached a threshold for garbage
+    // // collection and if so this function itself will spawn async tasks
+    // // to do key removal of the no longer necessary tribs.
+    // // Note there is only a 1 in TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of
+    // // moving forward to avoid excesscie duplicate garbage collection attempts from
+    // // successive posts by the same user.
+    // async fn garbage_collect_tribs_if_needed(bin_of_user: Box<dyn Storage>) -> TribResult<()> {
+    //     // Fetch the tribs list of the user
+    //     let res_list = bin_of_user.list_get(TRIBS_LIST_KEY).await?;
+    //     let res_vec: Vec<String> = res_list.0; // vec of TribListEntry serialized strings
 
-        // Only garbage collect if garbage collect length threshold is exceeded
-        if res_vec.len() < TRIBS_GARBAGE_COLLECT_THRESHOLD {
-            return Ok(());
-        }
+    //     // Only garbage collect if garbage collect length threshold is exceeded
+    //     if res_vec.len() < TRIBS_GARBAGE_COLLECT_THRESHOLD {
+    //         return Ok(());
+    //     }
 
-        // Only have a 1 in TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of actually doing garbage collection.
-        // This prevents quick successive user posts from flooding requests to the same bin to remove
-        // mostly the same outdated entries.
-        // Also if res_vec.len() is >= 8 + TRIBS_GARBAGE_COLLECT_THRESHOLD, then let the chance be 100%, since
-        // we consider that getting way too long.
-        if res_vec.len() < 8 + TRIBS_GARBAGE_COLLECT_THRESHOLD {
-            let mut rng = rand::thread_rng();
-            if rng.gen_range(1..=TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER) > 1 {
-                return Ok(()); // return since didnt get selected to move forward with GC.
-            }
-        }
+    //     // Only have a 1 in TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of actually doing garbage collection.
+    //     // This prevents quick successive user posts from flooding requests to the same bin to remove
+    //     // mostly the same outdated entries.
+    //     // Also if res_vec.len() is >= 8 + TRIBS_GARBAGE_COLLECT_THRESHOLD, then let the chance be 100%, since
+    //     // we consider that getting way too long.
+    //     if res_vec.len() < 8 + TRIBS_GARBAGE_COLLECT_THRESHOLD {
+    //         let mut rng = rand::thread_rng();
+    //         if rng.gen_range(1..=TRIBS_GARBAGE_COLLECTION_CHANCE_PARAMETER) > 1 {
+    //             return Ok(()); // return since didnt get selected to move forward with GC.
+    //         }
+    //     }
 
-        // Deserialize list and sort in TribListEntry format first (since we didnt define Ord for Trib)
-        let deserialized_list_result: Result<Vec<TribListEntry>, _> = res_vec
-            .iter()
-            .map(|serialized_entry| serde_json::from_str(serialized_entry))
-            .collect();
-        let mut trib_entries = deserialized_list_result?;
+    //     // Deserialize list and sort in TribListEntry format first (since we didnt define Ord for Trib)
+    //     let deserialized_list_result: Result<Vec<TribListEntry>, _> = res_vec
+    //         .iter()
+    //         .map(|serialized_entry| serde_json::from_str(serialized_entry))
+    //         .collect();
+    //     let mut trib_entries = deserialized_list_result?;
 
-        // Important: Sort based on tribble order
-        trib_entries.sort();
+    //     // Important: Sort based on tribble order
+    //     trib_entries.sort();
 
-        // Scale this with how excessive the length is.
-        // If trib_entries is getting too long though, choosing absolute trib_entries.len() - TRIBS_GARBAGE_COLLECT_THRESHOLD
-        // will help bring it down to exact TRIBS_GARBAGE_COLLECT_THRESHOLD after GC. Ideally we want to be in the first
-        // slowly scaling case (trib_entries.len() - MAX_TRIB_FETCH) / 2) being the max which means it would bring the list
-        // length down below TRIBS_GARBAGE_COLLECT_THRESHOLD
-        let num_entries_to_garbage_collect = std::cmp::max(
-            (trib_entries.len() - MAX_TRIB_FETCH) / 2,
-            trib_entries.len() - TRIBS_GARBAGE_COLLECT_THRESHOLD,
-        );
+    //     // Scale this with how excessive the length is.
+    //     // If trib_entries is getting too long though, choosing absolute trib_entries.len() - TRIBS_GARBAGE_COLLECT_THRESHOLD
+    //     // will help bring it down to exact TRIBS_GARBAGE_COLLECT_THRESHOLD after GC. Ideally we want to be in the first
+    //     // slowly scaling case (trib_entries.len() - MAX_TRIB_FETCH) / 2) being the max which means it would bring the list
+    //     // length down below TRIBS_GARBAGE_COLLECT_THRESHOLD
+    //     let num_entries_to_garbage_collect = std::cmp::max(
+    //         (trib_entries.len() - MAX_TRIB_FETCH) / 2,
+    //         trib_entries.len() - TRIBS_GARBAGE_COLLECT_THRESHOLD,
+    //     );
 
-        // Keep only up to NUM_ENTRIES_TO_GARBAGE_COLLECT_AT_A_TIME outdated entries to do garbage collection
-        // NUM_ENTRIES_TO_GARBAGE_COLLECT_AT_A_TIME is used to avoid sending too many requests at once.
-        trib_entries.truncate(num_entries_to_garbage_collect);
+    //     // Keep only up to NUM_ENTRIES_TO_GARBAGE_COLLECT_AT_A_TIME outdated entries to do garbage collection
+    //     // NUM_ENTRIES_TO_GARBAGE_COLLECT_AT_A_TIME is used to avoid sending too many requests at once.
+    //     trib_entries.truncate(num_entries_to_garbage_collect);
 
-        // To clone and move into tasks
-        let bin_of_user_arc = Arc::new(bin_of_user);
+    //     // To clone and move into tasks
+    //     let bin_of_user_arc = Arc::new(bin_of_user);
 
-        // Spawn async tasks to remove outdated entries. Don't wait for result
-        for entry_to_gc in trib_entries {
-            let bin_of_user_arc_clone = Arc::clone(&bin_of_user_arc);
-            tokio::spawn(async move {
-                bin_of_user_arc_clone
-                    .list_remove(&KeyValue {
-                        key: TRIBS_LIST_KEY.to_string(),
-                        value: serde_json::to_string(&entry_to_gc)?,
-                    })
-                    .await
-            });
-        }
+    //     // Spawn async tasks to remove outdated entries. Don't wait for result
+    //     for entry_to_gc in trib_entries {
+    //         let bin_of_user_arc_clone = Arc::clone(&bin_of_user_arc);
+    //         tokio::spawn(async move {
+    //             bin_of_user_arc_clone
+    //                 .list_remove(&KeyValue {
+    //                     key: TRIBS_LIST_KEY.to_string(),
+    //                     value: serde_json::to_string(&entry_to_gc)?,
+    //                 })
+    //                 .await
+    //         });
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
-    // Should not need to wait for this function to return. Caller should wrap in a tokio::spawn for example
-    // This can be done in the background. This function itself will spawn more tasks that it does wait for
-    // completion synchronously.
-    // Checks if the following_log is excessive by a certain threshold (has some amount of unnecessary
-    // entries greater than a threshold) before deciding on GC.
-    // Flip a FOLLOWING_LOG_GARBAGE_COLLECTION_CHANCE_PARAMETER-sided coin to decide to move forward with GC.
-    // Assumes resolved_log entries are the ones that must not be GC. Every entry in following_log and not in
-    // resolved_log is fair game for GC.
-    async fn garbage_collect_following_log_if_needed(
-        bin_of_user: Box<dyn Storage>,
-        following_log: Vec<FollowingLogEntry>,
-        resolved_log: Vec<FollowingLogEntry>,
-    ) -> TribResult<()> {
-        // Only GC if difference is greater than some threshold.
-        if following_log.len() - resolved_log.len()
-            < FOLLOWING_LOG_DIFFERENCE_RESOLVED_LOG_GARBAGE_COLLECTION_THRESHOLD
-        {
-            return Ok(());
-        }
+    // // Should not need to wait for this function to return. Caller should wrap in a tokio::spawn for example
+    // // This can be done in the background. This function itself will spawn more tasks that it does wait for
+    // // completion synchronously.
+    // // Checks if the following_log is excessive by a certain threshold (has some amount of unnecessary
+    // // entries greater than a threshold) before deciding on GC.
+    // // Flip a FOLLOWING_LOG_GARBAGE_COLLECTION_CHANCE_PARAMETER-sided coin to decide to move forward with GC.
+    // // Assumes resolved_log entries are the ones that must not be GC. Every entry in following_log and not in
+    // // resolved_log is fair game for GC.
+    // async fn garbage_collect_following_log_if_needed(
+    //     bin_of_user: Box<dyn Storage>,
+    //     following_log: Vec<FollowingLogEntry>,
+    //     resolved_log: Vec<FollowingLogEntry>,
+    // ) -> TribResult<()> {
+    //     // Only GC if difference is greater than some threshold.
+    //     if following_log.len() - resolved_log.len()
+    //         < FOLLOWING_LOG_DIFFERENCE_RESOLVED_LOG_GARBAGE_COLLECTION_THRESHOLD
+    //     {
+    //         return Ok(());
+    //     }
 
-        // Only have a 1 in FOLLOWING_LOG_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of moving forward
-        // with GC, unless the difference is too large then 100%.
-        if following_log.len() - resolved_log.len()
-            < 2 * FOLLOWING_LOG_DIFFERENCE_RESOLVED_LOG_GARBAGE_COLLECTION_THRESHOLD
-        {
-            let mut rng = rand::thread_rng();
-            if rng.gen_range(1..=FOLLOWING_LOG_GARBAGE_COLLECTION_CHANCE_PARAMETER) > 1 {
-                return Ok(()); // return since didnt get selected to move forward with GC.
-            }
-        }
+    //     // Only have a 1 in FOLLOWING_LOG_GARBAGE_COLLECTION_CHANCE_PARAMETER chance of moving forward
+    //     // with GC, unless the difference is too large then 100%.
+    //     if following_log.len() - resolved_log.len()
+    //         < 2 * FOLLOWING_LOG_DIFFERENCE_RESOLVED_LOG_GARBAGE_COLLECTION_THRESHOLD
+    //     {
+    //         let mut rng = rand::thread_rng();
+    //         if rng.gen_range(1..=FOLLOWING_LOG_GARBAGE_COLLECTION_CHANCE_PARAMETER) > 1 {
+    //             return Ok(()); // return since didnt get selected to move forward with GC.
+    //         }
+    //     }
 
-        // Keep a set of the resolved entries logical timestamps, which should uniquely identify and map 1-1 to a
-        // resolved FollowingLogEntry. Then it will be more efficent to check which entries in following log are not
-        // in resolved log
-        let resolved_log_set: HashSet<u64> =
-            resolved_log.into_iter().map(|entry| entry.clock).collect();
+    //     // Keep a set of the resolved entries logical timestamps, which should uniquely identify and map 1-1 to a
+    //     // resolved FollowingLogEntry. Then it will be more efficent to check which entries in following log are not
+    //     // in resolved log
+    //     let resolved_log_set: HashSet<u64> =
+    //         resolved_log.into_iter().map(|entry| entry.clock).collect();
 
-        // To clone and move into tasks
-        let bin_of_user_arc = Arc::new(bin_of_user);
+    //     // To clone and move into tasks
+    //     let bin_of_user_arc = Arc::new(bin_of_user);
 
-        for entry in following_log {
-            // Again, clock uniquely identifies an entry. If an entry in following log is not
-            // in the resolved log, it is outdated.
-            if !resolved_log_set.contains(&entry.clock) {
-                let bin_of_user_arc_clone = Arc::clone(&bin_of_user_arc);
-                tokio::spawn(async move {
-                    bin_of_user_arc_clone
-                        .list_remove(&KeyValue {
-                            key: FOLLOWING_ACTION_LIST_KEY.to_string(),
-                            value: serde_json::to_string(&entry)?,
-                        })
-                        .await
-                });
-            }
-        }
+    //     for entry in following_log {
+    //         // Again, clock uniquely identifies an entry. If an entry in following log is not
+    //         // in the resolved log, it is outdated.
+    //         if !resolved_log_set.contains(&entry.clock) {
+    //             let bin_of_user_arc_clone = Arc::clone(&bin_of_user_arc);
+    //             tokio::spawn(async move {
+    //                 bin_of_user_arc_clone
+    //                     .list_remove(&KeyValue {
+    //                         key: FOLLOWING_ACTION_LIST_KEY.to_string(),
+    //                         value: serde_json::to_string(&entry)?,
+    //                     })
+    //                     .await
+    //             });
+    //         }
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 }
 
 #[async_trait]
@@ -692,13 +639,6 @@ impl Server for TribFront {
             // I.e. TribResult<bool> type is returned, so in addition to the possible Err() result, the Ok(false)
             // could also indicate error setting value
             if !append_reg_entry_success {
-                // If failed, mark entry as invalid
-                // don't care about this result since not gonna keep trying to mark invalid
-                Self::update_registration_entry_validity(
-                    early_reg_bin,
-                    user,
-                    EarlyRegistrationStatus::Invalid,
-                );
                 return Err("Error upon list_append to add user to early registration log".into());
             }
 
@@ -711,25 +651,10 @@ impl Server for TribFront {
                 .await?;
             // Check for err (see storage set interface comment, if res = false, then also error)
             if !sign_up_success {
-                // If failed, mark entry as invalid
-                // don't care about this result since not gonna keep trying to mark invalid
-                Self::update_registration_entry_validity(
-                    early_reg_bin,
-                    user,
-                    EarlyRegistrationStatus::Invalid,
-                );
                 return Err("Error upon set USER_EXISTS_KEY to commit user registration".into());
             }
             // IMPORTANT From this point forwards, must NOT return error. Not returning because crash is ok since
             // network partitions can happen anway but returning error after committed regisration is unacceptable.
-
-            // It's fine if not successful, since upon seeing EarlyRegistrationStatus::Uncertain, others will still
-            // have to refer to source of truth location
-            Self::update_registration_entry_validity(
-                early_reg_bin,
-                user,
-                EarlyRegistrationStatus::Valid,
-            );
 
             // Update cache for next time. Do NOT propagate error.
             let _ = self.update_cached_users_if_needed().await;
@@ -836,12 +761,12 @@ impl Server for TribFront {
 
         // From here onwards MUST RETURN SUCCESS
 
-        // If needed, Garbage collect posts. Spawn async task to do so.
-        // Note we are not actually waiting for tokio spawn handle to return and don't care
-        // about results.
-        tokio::spawn(async move {
-            let _ = Self::garbage_collect_tribs_if_needed(bin_of_user).await;
-        });
+        // // If needed, Garbage collect posts. Spawn async task to do so.
+        // // Note we are not actually waiting for tokio spawn handle to return and don't care
+        // // about results.
+        // tokio::spawn(async move {
+        //     let _ = Self::garbage_collect_tribs_if_needed(bin_of_user).await;
+        // });
 
         Ok(())
     }
@@ -918,21 +843,21 @@ impl Server for TribFront {
         let resolved_following_entries: Vec<FollowingLogEntry> =
             Self::resolve_current_following_state(&following_log);
 
-        // Possible garbage collection in background. Only CONSIDER executing if following_log is some amount
-        // longer than resolved_following_entries, which guarantees the difference in entries are number of unnecessary
-        // entries in log. This prevents unneccesarily frequent garbage collection.
-        // Simply request removes of some/all entries that are in following_log but not in resolved_following_entries.
-        let bin_of_user_for_following_gc = self.bin_storage.bin(who).await?;
-        let following_log_clone = following_log.clone();
-        let resolved_following_entries_clone = resolved_following_entries.clone();
-        tokio::spawn(async move {
-            let _ = Self::garbage_collect_following_log_if_needed(
-                bin_of_user_for_following_gc,
-                following_log_clone,
-                resolved_following_entries_clone,
-            )
-            .await;
-        });
+        // // Possible garbage collection in background. Only CONSIDER executing if following_log is some amount
+        // // longer than resolved_following_entries, which guarantees the difference in entries are number of unnecessary
+        // // entries in log. This prevents unneccesarily frequent garbage collection.
+        // // Simply request removes of some/all entries that are in following_log but not in resolved_following_entries.
+        // let bin_of_user_for_following_gc = self.bin_storage.bin(who).await?;
+        // let following_log_clone = following_log.clone();
+        // let resolved_following_entries_clone = resolved_following_entries.clone();
+        // tokio::spawn(async move {
+        //     let _ = Self::garbage_collect_following_log_if_needed(
+        //         bin_of_user_for_following_gc,
+        //         following_log_clone,
+        //         resolved_following_entries_clone,
+        //     )
+        //     .await;
+        // });
 
         // Keep track of the last most entry holding an action on "whom".
         // Could be None if doesn't exist in log (hence Option<>).

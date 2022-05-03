@@ -9,15 +9,18 @@ use tribbler::{
     storage::{BinStorage, KeyList, KeyString, KeyValue, List, Pattern, Storage},
 };
 
+use rand::Rng;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+const NUM_CLIENTS_SHARED_PER_BACKEND: usize = 2;
 pub struct BinClient {
     /// The addresses of back-ends prefixed with "http://"" i.e. "http://<host>:<port>""
     pub http_back_addrs: Vec<String>,
     /// Vector of client_opts to be shared per backend (corresponding to the back_addrs)
     /// when creating and returning new clients from bin()
-    pub client_opt_vec: Vec<Arc<RwLock<Option<TribStorageClient<tonic::transport::Channel>>>>>,
+    pub client_opt_pools:
+        Vec<Vec<Arc<RwLock<Option<TribStorageClient<tonic::transport::Channel>>>>>>,
 }
 
 impl BinClient {
@@ -33,7 +36,10 @@ impl BinClient {
 
         BinClient {
             http_back_addrs: http_back_addrs,
-            client_opt_vec: vec![Arc::new(RwLock::new(None)); back_addrs_len],
+            client_opt_pools: vec![
+                vec![Arc::new(RwLock::new(None)); NUM_CLIENTS_SHARED_PER_BACKEND];
+                back_addrs_len
+            ],
         }
     }
 }
@@ -57,7 +63,12 @@ impl BinStorage for BinClient {
         escaped_name.hash(&mut hasher);
         let client_idx = hasher.finish() % self.http_back_addrs.len() as u64;
         let http_back_addr = &self.http_back_addrs[client_idx as usize];
-        let client_opt = Arc::clone(&self.client_opt_vec[client_idx as usize]);
+
+        // Random connection in pool
+        let mut rng = rand::thread_rng();
+        let rand_idx_in_pool = rng.gen_range(0..NUM_CLIENTS_SHARED_PER_BACKEND);
+
+        let client_opt = Arc::clone(&self.client_opt_pools[client_idx as usize][rand_idx_in_pool]);
 
         Ok(Box::new(StorageClientMapperWrapper {
             bin_name: escaped_name.to_string(),
