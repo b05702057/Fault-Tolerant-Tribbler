@@ -1,28 +1,39 @@
-use crate::lab1::new_client;
+use crate::lab1::client::StorageClient;
 use async_trait::async_trait;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tribbler::{
     colon,
     err::TribResult,
+    rpc::trib_storage_client::TribStorageClient,
     storage::{BinStorage, KeyList, KeyString, KeyValue, List, Pattern, Storage},
 };
+
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct BinClient {
     /// The addresses of back-ends prefixed with "http://"" i.e. "http://<host>:<port>""
     pub http_back_addrs: Vec<String>,
+    /// Vector of client_opts to be shared per backend (corresponding to the back_addrs)
+    /// when creating and returning new clients from bin()
+    pub client_opt_vec: Vec<Arc<RwLock<Option<TribStorageClient<tonic::transport::Channel>>>>>,
 }
 
 impl BinClient {
     pub fn new(back_addrs: Vec<String>) -> BinClient {
+        let back_addrs_len = back_addrs.len();
+
         // Assumes valid backend addresses. If not valid will return error when storage
         // operations is requested
         let http_back_addrs = back_addrs
             .into_iter()
             .map(|back_addr| format!("http://{}", back_addr))
             .collect::<Vec<String>>();
+
         BinClient {
             http_back_addrs: http_back_addrs,
+            client_opt_vec: vec![Arc::new(RwLock::new(None)); back_addrs_len],
         }
     }
 }
@@ -46,10 +57,14 @@ impl BinStorage for BinClient {
         escaped_name.hash(&mut hasher);
         let client_idx = hasher.finish() % self.http_back_addrs.len() as u64;
         let http_back_addr = &self.http_back_addrs[client_idx as usize];
+        let client_opt = Arc::clone(&self.client_opt_vec[client_idx as usize]);
 
         Ok(Box::new(StorageClientMapperWrapper {
             bin_name: escaped_name.to_string(),
-            storage_client: new_client(http_back_addr).await?,
+            storage_client: Box::new(StorageClient::new_with_client_opt(
+                http_back_addr,
+                client_opt,
+            )),
         }))
     }
 }

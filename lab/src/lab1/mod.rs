@@ -566,5 +566,6 @@
 mod lab;
 pub use crate::lab1::lab::new_client;
 pub use crate::lab1::lab::serve_back;
-mod client;
+pub mod client;
 mod server;
+pub use crate::lab1::client::StorageClient;

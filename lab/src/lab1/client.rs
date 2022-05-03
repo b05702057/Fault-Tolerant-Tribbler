@@ -27,11 +27,22 @@ pub struct StorageClient {
 }
 
 impl StorageClient {
-    // Creates new StorageClient struct with http_addr and a connected client
+    // Creates new StorageClient struct with http_addr
     pub fn new(http_addr: &String) -> StorageClient {
         StorageClient {
             http_addr: http_addr.clone(),
             client_opt: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    // Creates new StorageClient struct with http_addr and intiliazes client_opt to the passed in parameter
+    pub fn new_with_client_opt(
+        http_addr: &String,
+        client_opt: Arc<RwLock<Option<TribStorageClient<tonic::transport::Channel>>>>,
+    ) -> StorageClient {
+        StorageClient {
+            http_addr: http_addr.clone(),
+            client_opt: client_opt,
         }
     }
 
