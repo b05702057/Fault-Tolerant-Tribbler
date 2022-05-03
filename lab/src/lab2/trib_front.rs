@@ -662,30 +662,27 @@ impl Server for TribFront {
             };
 
             let new_reg_entry_serialized = serde_json::to_string(&new_reg_entry)?;
-            let append_reg_entry_success = early_reg_bin
-                .list_append(&KeyValue {
-                    key: EARLY_REGISTRATION_LOG_KEY.to_string(),
-                    value: new_reg_entry_serialized,
-                })
-                .await?;
-            // According to Storage trait signature description, a false returned could also indicate error.
-            // I.e. TribResult<bool> type is returned, so in addition to the possible Err() result, the Ok(false)
-            // could also indicate error setting value
-            if !append_reg_entry_success {
-                return Err("Error upon list_append to add user to early registration log".into());
-            }
 
-            // Commit point now. Source of truth is at bin of user at the USER_EXISTS_KEY location.
-            let sign_up_success = bin_of_user
-                .set(&KeyValue {
-                    key: USER_EXISTS_KEY.to_string(),
-                    value: USER_EXISTS_VALUE.to_string(),
-                })
-                .await?;
+            let reg_append_key_value = KeyValue {
+                key: EARLY_REGISTRATION_LOG_KEY.to_string(),
+                value: new_reg_entry_serialized,
+            };
+            let sign_up_key_value = KeyValue {
+                key: USER_EXISTS_KEY.to_string(),
+                value: USER_EXISTS_VALUE.to_string(),
+            };
+
+            // Do reg list append and sign up "commit point" concurrently
+            let (append_reg_entry_success, sign_up_success) = tokio::join!(
+                early_reg_bin.list_append(&reg_append_key_value),
+                bin_of_user.set(&sign_up_key_value)
+            );
+
             // Check for err (see storage set interface comment, if res = false, then also error)
-            if !sign_up_success {
+            if !append_reg_entry_success? || !sign_up_success? {
                 return Err("Error upon set USER_EXISTS_KEY to commit user registration".into());
             }
+
             // IMPORTANT From this point forwards, must NOT return error. Not returning because crash is ok since
             // network partitions can happen anway but returning error after committed regisration is unacceptable.
 
