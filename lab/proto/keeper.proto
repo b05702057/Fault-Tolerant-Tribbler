@@ -7,27 +7,23 @@ package keeper;
 // Add your message and service definitions below this line
 message Clock {
     uint64 timestamp = 1;
+    string address = 2;
+    bool is_first_clock = 3;
 }
 
-message LogEntry {
-    uint64 index = 1;
-    string operation = 2;
-}
-
-message BackendStatusList {
-    repeated string addressList = 1;
-    repeated bool statusList = 2;
+message Key {
+    string key = 1;
 }
 
 message Bool {
     bool value = 1;
 }
 
-message None {
+message Address {
+    string Address = 1;
 }
 
 service TribStorage {
-    rpc sendClock(Clock) returns (Bool);
-    rpc sendLogEntry(LogEntry) returns (Bool);
-    rpc getBackendStatusList(None) returns (BackendStatusList);
+    rpc sendClock(Clock) returns (Address);
+    rpc sendKey(Key) returns (Bool);
 }
