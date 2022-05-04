@@ -167,4 +167,5 @@
 //! if they feel the need.
 //!
 //! Happy Lab 3. :-)
+mod keeper_client;
 mod keeper_server;

@@ -7,7 +7,7 @@ package keeper;
 // Add your message and service definitions below this line
 message Clock {
     uint64 timestamp = 1;
-    string address = 2;
+    uint64 idx = 2;
     bool is_first_clock = 3;
 }
 

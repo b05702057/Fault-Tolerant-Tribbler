@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -11,8 +10,8 @@ use async_trait::async_trait;
 use tonic::Response;
 
 pub struct KeeperServer {
-    pub timestamp: Arc<RwLock<u64>>,                         // to sync
-    pub keeper_statuses: Arc<RwLock<HashMap<String, bool>>>, // get the keeper status with an address
+    pub timestamp: Arc<RwLock<u64>>,            // to sync
+    pub statuses: Arc<RwLock<Vec<bool>>>,       // the statuses of all keepers
     pub key_list: Arc<RwLock<HashSet<String>>>, // store the keys of finsihed lists as a helper
     pub event_backend: Arc<RwLock<String>>,     // hold the lock when the keeper runs scan()
     pub scan_count: Arc<RwLock<u64>>,           // count #scan since the clock is sent
@@ -46,9 +45,9 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
         }
 
         // update the keeper status
-        let mut keeper_map = self.keeper_statuses.write().await;
-        keeper_map.insert(received_request.address, true);
-        drop(keeper_map);
+        let mut statuses = self.statuses.write().await;
+        statuses[received_request.idx as usize] = true;
+        drop(statuses);
 
         // two scans
         let mut scan_count = self.scan_count.write().await;
