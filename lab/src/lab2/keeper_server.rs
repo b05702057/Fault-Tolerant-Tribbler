@@ -109,7 +109,7 @@ impl KeeperServer {
                 .collect();
 
             // Note chaining of "??" is needed. One is for the tokio's spawned task error
-            // capturing (a Result<>) and the other is from our client connect() function which
+            // capturing (a Result<>) and the other is from our client clock() function which
             // is also another Result
             for task in tasks {
                 // let res = task.await??;  // old version that doesnt ignore error

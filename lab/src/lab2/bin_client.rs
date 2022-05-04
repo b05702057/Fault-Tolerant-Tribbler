@@ -2,6 +2,7 @@ use crate::lab1::client::StorageClient;
 use async_trait::async_trait;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::time::Duration;
 use tribbler::{
     colon,
     err::TribResult,
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 const NUM_CLIENTS_SHARED_PER_BACKEND: usize = 2;
+const BIN_CLIENT_SCANNING_BACKEND_INTERVAL: Duration = Duration::from_secs(3);
 pub struct BinClient {
     /// The addresses of back-ends prefixed with "http://"" i.e. "http://<host>:<port>""
     pub http_back_addrs: Vec<String>,
@@ -21,6 +23,8 @@ pub struct BinClient {
     /// when creating and returning new clients from bin()
     pub client_opt_pools:
         Vec<Vec<Arc<RwLock<Option<TribStorageClient<tonic::transport::Channel>>>>>>,
+
+    pub live_http_back_addrs: Arc<RwLock<Vec<String>>>,
 }
 
 impl BinClient {
@@ -34,14 +38,148 @@ impl BinClient {
             .map(|back_addr| format!("http://{}", back_addr))
             .collect::<Vec<String>>();
 
-        BinClient {
+        let ret_obj = BinClient {
             http_back_addrs: http_back_addrs,
             client_opt_pools: vec![
                 vec![Arc::new(RwLock::new(None)); NUM_CLIENTS_SHARED_PER_BACKEND];
                 back_addrs_len
             ],
+            live_http_back_addrs: Arc::new(RwLock::new(vec![])),
+        };
+
+        // Prepare resources needed for periodic scanning
+        let mut clients_for_scanning_arcs = vec![];
+        for http_addr in ret_obj.http_back_addrs.iter() {
+            clients_for_scanning_arcs.push(Arc::new(StorageClient::new(http_addr)));
+        }
+        let live_http_back_addrs_arc = Arc::clone(&ret_obj.live_http_back_addrs);
+        let http_back_addrs_clone = ret_obj.http_back_addrs.clone();
+
+        tokio::spawn(async move {
+            Self::periodic_scan(
+                http_back_addrs_clone,
+                live_http_back_addrs_arc,
+                clients_for_scanning_arcs,
+            )
+            .await
+        });
+
+        ret_obj
+    }
+
+    async fn periodic_scan(
+        http_back_addrs: Vec<String>,
+        live_http_back_addrs_arc: Arc<RwLock<Vec<String>>>,
+        clients_for_scanning: Vec<Arc<StorageClient>>,
+    ) -> TribResult<()> {
+        let mut now = std::time::Instant::now();
+
+        loop {
+            println!(
+                "[DEBUGGING] bin_client's periodic_scan: LOOPING, time since last loop: {} ms",
+                now.elapsed().as_millis()
+            );
+            now = std::time::Instant::now();
+
+            let clients_for_scanning_clones = clients_for_scanning.clone();
+
+            let tasks: Vec<_> = clients_for_scanning_clones
+                .into_iter()
+                .map(|client| {
+                    // Note deliberately NOT adding ";" to the async function as well as the
+                    // spawn statements since they are used as expression return results
+                    // Clocking to see if server alive
+                    tokio::spawn(async move { client.clock(0).await })
+                })
+                .collect();
+
+            let mut temp_live_http_back_addrs = vec![];
+
+            // Note chaining of "??" is needed. One is for the tokio's spawned task error
+            // capturing (a Result<>) and the other is from our connect() function which
+            // is also another Result
+            for (back_vec_idx, task) in tasks.into_iter().enumerate() {
+                // If connection successful, then server is live
+                match task.await? {
+                    Ok(_) => temp_live_http_back_addrs.push(http_back_addrs[back_vec_idx].clone()),
+                    Err(_) => (),
+                }
+            }
+
+            println!(
+                "[DEBUGGING] bin_client's periodic_scan: http_back_addrs.len(): {}",
+                http_back_addrs.len()
+            );
+            println!(
+                "[DEBUGGING] bin_client's periodic_scan: live_addrs.len(): {}",
+                temp_live_http_back_addrs.len()
+            );
+
+            let mut live_http_back_addrs = live_http_back_addrs_arc.write().await;
+            *live_http_back_addrs = temp_live_http_back_addrs;
+            drop(live_http_back_addrs); // Important to drop lock, don't hold across sleep below
+
+            // Wait interval til next scan
+            tokio::time::sleep(BIN_CLIENT_SCANNING_BACKEND_INTERVAL).await;
         }
     }
+
+    // async fn periodic_scan(
+    //     http_back_addrs: Vec<String>,
+    //     live_http_back_addrs_arc: Arc<RwLock<Vec<String>>>,
+    //     clients_for_scanning: StorageClient,
+    // ) -> TribResult<()> {
+    //     let mut now = std::time::Instant::now();
+
+    //     loop {
+    //         println!(
+    //             "[DEBUGGING] bin_client's periodic_scan: LOOPING, time since last loop: {} ms",
+    //             now.elapsed().as_millis()
+    //         );
+    //         now = std::time::Instant::now();
+
+    //         let http_back_addrs_clone = http_back_addrs.clone();
+
+    //         let tasks: Vec<_> = http_back_addrs_clone
+    //             .into_iter()
+    //             .map(|http_back_addr| {
+    //                 // Note deliberately NOT adding ";" to the async function as well as the
+    //                 // spawn statements since they are used as expression return results
+    //                 // Attempt connection
+    //                 tokio::spawn(async move { TribStorageClient::connect(http_back_addr).await })
+    //             })
+    //             .collect();
+
+    //         let mut temp_live_http_back_addrs = vec![];
+
+    //         // Note chaining of "??" is needed. One is for the tokio's spawned task error
+    //         // capturing (a Result<>) and the other is from our connect() function which
+    //         // is also another Result
+    //         for (back_vec_idx, task) in tasks.into_iter().enumerate() {
+    //             // If connection successful, then server is live
+    //             match task.await? {
+    //                 Ok(_) => temp_live_http_back_addrs.push(http_back_addrs[back_vec_idx].clone()),
+    //                 Err(_) => (),
+    //             }
+    //         }
+
+    //         println!(
+    //             "[DEBUGGING] bin_client's periodic_scan: http_back_addrs.len(): {}",
+    //             http_back_addrs.len()
+    //         );
+    //         println!(
+    //             "[DEBUGGING] bin_client's periodic_scan: live_addrs.len(): {}",
+    //             temp_live_http_back_addrs.len()
+    //         );
+
+    //         let mut live_http_back_addrs = live_http_back_addrs_arc.write().await;
+    //         *live_http_back_addrs = temp_live_http_back_addrs;
+    //         drop(live_http_back_addrs); // Important to drop lock, don't hold across sleep below
+
+    //         // Wait interval til next scan
+    //         tokio::time::sleep(BIN_CLIENT_SCANNING_BACKEND_INTERVAL).await;
+    //     }
+    // }
 }
 
 #[async_trait]
