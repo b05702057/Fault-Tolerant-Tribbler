@@ -21,6 +21,7 @@ pub struct BinClient {
     pub http_back_addrs: Vec<String>,
     /// Vector of client_opts to be shared per backend (corresponding to the back_addrs)
     /// when creating and returning new clients from bin()
+    /// First dimension will be pools. 2nd dimension will correspond to backends.
     pub client_opt_pools:
         Vec<Vec<Arc<RwLock<Option<TribStorageClient<tonic::transport::Channel>>>>>>,
 
@@ -207,6 +208,21 @@ impl BinStorage for BinClient {
         let rand_idx_in_pool = rng.gen_range(0..NUM_CLIENTS_SHARED_PER_BACKEND);
 
         let client_opt = Arc::clone(&self.client_opt_pools[client_idx as usize][rand_idx_in_pool]);
+
+        // TODO: change initialization to 
+        // client_opt_pools: vec![
+        //     vec![Arc::new(RwLock::new(None)); back_addrs_len];
+        //     NUM_CLIENTS_SHARED_PER_BACKEND
+        // ],
+        // let client_opt_vec = self.client_opt_pools[rand_idx_in_pool].clone(); // cloned vector (which recursively clones Arcs)
+        // let mut storage_client_vec = vec![];
+        // for client_opt in client_opt_vec {
+        //     storage_client_vec.push(Box::new(StorageClient::new_with_client_opt(
+        //         http_back_addr,
+        //         client_opt,
+        //     )));
+        // }
+        
 
         Ok(Box::new(StorageClientMapperWrapper {
             bin_name: escaped_name.to_string(),
