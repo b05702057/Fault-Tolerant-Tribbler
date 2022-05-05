@@ -2,6 +2,7 @@ use crate::keeper::trib_storage_client::TribStorageClient;
 use crate::{
     keeper,
     keeper::{Acknowledgement, Bool, Clock, Key},
+    lab3::keeper_client::KeeperClient,
 };
 
 use async_trait::async_trait;
@@ -18,6 +19,21 @@ use tribbler::config::KeeperConfig;
 use tribbler::err::TribResult;
 
 const MAX_BACKEND_NUM: u64 = 300;
+
+#[derive(PartialEq, Clone)]
+pub enum BackendEventType {
+    Join,
+    Leave,
+    None,
+}
+
+#[derive(Clone)]
+pub struct BackendEvent {
+    pub event_type: BackendEventType,
+    pub back_idx: usize,
+    pub timestamp: Instant,
+}
+
 pub struct KeeperServer {
     pub backs: Arc<RwLock<Vec<String>>>,       // backend addresses
     pub addrs: Arc<RwLock<Vec<String>>>,       // keeper addresses
@@ -28,14 +44,13 @@ pub struct KeeperServer {
     pub this: Arc<RwLock<usize>>,              // the index of this keeper
     pub timestamp: Arc<RwLock<u64>>,           // timestamp of this keeper
     pub key_list: Arc<RwLock<HashSet<String>>>, // store the keys of finsihed lists to help migration
-    pub detecting_event: Arc<RwLock<String>>,   // the most recent backend event
-    pub detecting_time: Arc<RwLock<Instant>>,   // the time of the backend event
-    pub acknowledged_event: Arc<RwLock<String>>, // the most recent acknowledged event
-    pub acknowledged_time: Arc<RwLock<Instant>>, // the time of the acknowledged event
+    pub event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
+    pub event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
     pub acknowledging_time: Arc<RwLock<Instant>>, // the most recent acknowledging event
-    pub mutex: Mutex<u64>,                      // event/time mutex
-    pub initializing: Arc<RwLock<bool>>,        // if this keeper is initializing
+    pub event_handling_mutex: Arc<Mutex<u64>>,    // event/time mutex
+    pub initializing: Arc<RwLock<bool>>,          // if this keeper is initializing
     pub client_opts: Arc<Mutex<Vec<Option<TribStorageClient<tonic::transport::Channel>>>>>, // keeper connections
+    pub keeper_client: Arc<RwLock<Option<KeeperClient>>>,
 }
 
 impl KeeperServer {
@@ -55,7 +70,20 @@ impl KeeperServer {
         }
         statuses[this] = true;
 
-        KeeperServer {
+        let detected_event_type = BackendEventType::None;
+        let detected_backend_event = BackendEvent {
+            event_type: detected_event_type,
+            back_idx: 0,
+            timestamp: Instant::now(),
+        };
+        let acked_event_type = BackendEventType::None;
+        let acked_backend_event = BackendEvent {
+            event_type: acked_event_type,
+            back_idx: 0,
+            timestamp: Instant::now(),
+        };
+
+        let mut keeper_server = KeeperServer {
             backs: Arc::new(RwLock::new(backs)),
             addrs: Arc::new(RwLock::new(addrs)),
             statuses: Arc::new(RwLock::new(statuses)),
@@ -65,218 +93,33 @@ impl KeeperServer {
             this: Arc::new(RwLock::new(this)),
             timestamp: Arc::new(RwLock::new(0)),
             key_list: Arc::new(RwLock::new(HashSet::<String>::new())),
-            detecting_event: Arc::new(RwLock::new("".to_string())),
-            detecting_time: Arc::new(RwLock::new(Instant::now())),
-            acknowledged_event: Arc::new(RwLock::new("".to_string())),
-            acknowledged_time: Arc::new(RwLock::new(Instant::now())),
+            event_detected_by_this: Arc::new(RwLock::new(Some(detected_backend_event))),
+            event_acked_by_successor: Arc::new(RwLock::new(Some(acked_backend_event))),
             acknowledging_time: Arc::new(RwLock::new(Instant::now())),
-            mutex: Mutex::new(0),
+            event_handling_mutex: Arc::new(Mutex::new(0)),
             initializing: Arc::new(RwLock::new(true)),
             client_opts: Arc::new(Mutex::new(client_opts)),
-        }
-    }
-
-    pub async fn initialization(&self) -> TribResult<bool> {
-        let addrs = self.addrs.read().await;
-        let this = self.this.read().await;
-        let mut normal_join = false; // if this is a normal join operation
-        let start_time = Instant::now();
-        let mut current_time = Instant::now();
-
-        // detect other keepers for 5 seconds
-        while current_time.duration_since(start_time) < Duration::new(5, 0) {
-            for idx in 0..addrs.len() {
-                // only contact other keepers
-                if idx == *this {
-                    continue;
-                }
-                // check acknowledgement
-                let acknowledgement = self.client_send_clock(idx, true, 1).await; // step 1
-                let mut statuses = self.statuses.write().await;
-                match acknowledgement {
-                    // alive
-                    Ok(acknowledgement) => {
-                        // just a normal join operation
-                        if !acknowledgement.initializing {
-                            normal_join = true; // don't break here because we want to establish a complete keeper view
-                        }
-                        statuses[idx] = true; // maintain the keeper statuses
-                    }
-                    // down
-                    Err(_) => {
-                        statuses[idx] = false; // maintain the keeper statuses
-                    }
-                }
-                drop(statuses)
-            }
-            // break here because we have got enough information
-            if normal_join {
-                break;
-            }
-            current_time = Instant::now(); // reset current time
-        }
-
-        // get end positions of alive keepers
-        let mut alive_vector = Vec::<u64>::new();
-        let statuses = self.statuses.read().await;
-        let end_positions = self.end_positions.read().await;
-        for idx in 0..addrs.len() {
-            if statuses[idx] {
-                alive_vector.push(end_positions[idx]);
-            }
-        }
-        // get the range
-        let mut pre_manage_range = self.pre_manage_range.write().await;
-        let mut manage_range = self.manage_range.write().await;
-        let alive_num = alive_vector.len();
-        if alive_num == 1 {
-            *pre_manage_range = (
-                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
-                end_positions[*this],
-            );
-            *manage_range = (
-                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
-                end_positions[*this],
-            );
-        } else {
-            for idx in 0..alive_num {
-                if alive_vector[idx] == end_positions[*this] {
-                    let start_idx = ((idx - 1) + alive_num) % alive_num;
-                    let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
-                    *pre_manage_range = (
-                        (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM,
-                        alive_vector[start_idx],
-                    );
-                    *manage_range = (
-                        (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM,
-                        alive_vector[idx],
-                    );
-                }
-            }
-        }
-        drop(this);
-        drop(addrs);
-        drop(pre_manage_range);
-        drop(manage_range);
-
-        if normal_join {
-            // scan the backends and sleep for a specific amount of time
-            // todo!();
-            thread::sleep(Duration::from_secs(4)); // sleep after the first scan
-
-            // find the successor
-            let this = self.this.read().await;
-            let addrs = self.addrs.read().await;
-            let statuses = self.statuses.read().await;
-            let mut successor_index = *this;
-            for idx in *this + 1..addrs.len() {
-                if statuses[idx] {
-                    successor_index = idx;
-                    break;
-                }
-            }
-            drop(addrs);
-            // hasn't find the successor yet
-            if successor_index == *this {
-                for idx in 0..*this {
-                    if statuses[idx] {
-                        successor_index = idx;
-                        break;
-                    }
-                }
-            }
-            drop(statuses);
-
-            // found a successor => get the acknowledged event
-            if successor_index != *this {
-                let acknowledgement = self.client_send_clock(successor_index, true, 2).await; // step 2
-                match acknowledgement {
-                    // alive
-                    Ok(acknowledgement) => {
-                        if acknowledgement.event.len() != 0 {
-                            let mut acknowledged_event = self.acknowledged_event.write().await;
-                            *acknowledged_event = acknowledgement.event;
-                            drop(acknowledged_event);
-
-                            let mut acknowledged_time = self.acknowledged_time.write().await;
-                            *acknowledged_time = Instant::now();
-                            drop(acknowledged_time);
-                        }
-                    }
-                    // down
-                    Err(_) => (),
-                }
-            }
-        } else {
-            // starting phase
-            // scan to maintain the backends
-            todo!();
-        }
-        Ok(true) // can send the ready signal
-    }
-
-    // Client Functions
-    pub async fn client_connect(&self, idx: usize) -> TribResult<()> {
-        // connect if not already connected
-        let mut client_opts = Arc::clone(&self.client_opts).lock_owned().await;
-        // To prevent unnecessary reconnection, we only connect if we haven't.
-        if let None = client_opts[idx] {
-            let addr = &self.addrs.read().await[idx];
-            client_opts[idx] = Some(TribStorageClient::connect(addr.clone()).await?);
-            drop(addr);
-        }
-        Ok(())
-    }
-
-    // send clock to other keepers to maintain the keeper view
-    pub async fn client_send_clock(
-        &self,
-        idx: usize,
-        initializing: bool,
-        step: u64,
-    ) -> TribResult<Acknowledgement> {
-        // client_opt is a tokio::sync::OwnedMutexGuard
-        let client_opts = Arc::clone(&self.client_opts).lock_owned().await;
-        self.client_connect(idx).await?;
-        let client_opt = &client_opts[idx];
-
-        // Note the client_opt lock guard previously acquired will be held throughout this call, preventing concurrency issues.
-        let mut client = match client_opt {
-            // RPC client is clonable and works fine with concurrent clients.
-            Some(client) => client.clone(),
-            None => return Err("Client was somehow not connected / be initialized!".into()),
+            keeper_client: Arc::new(RwLock::new(None)),
         };
-        drop(client_opts);
 
-        let timestamp = self.timestamp.read().await;
-        let acknowledgement = client
-            .send_clock(Clock {
-                timestamp: *timestamp,
-                idx: idx.try_into().unwrap(),
-                initializing,
-                step,
-            })
-            .await?;
-        drop(timestamp);
-        Ok(acknowledgement.into_inner())
-    }
-
-    // send keys of finished lists
-    pub async fn client_send_key(&self, idx: usize, key: String) -> TribResult<bool> {
-        // client_opt is a tokio::sync::OwnedMutexGuard
-        let client_opts = Arc::clone(&self.client_opts).lock_owned().await;
-        self.client_connect(idx).await?;
-        let client_opt = &client_opts[idx];
-
-        // Note the client_opt lock guard previously acquired will be held throughout this call, preventing concurrency issues.
-        let mut client = match client_opt {
-            // RPC client is clonable and works fine with concurrent clients.
-            Some(client) => client.clone(),
-            None => return Err("Client was somehow not connected / be initialized!".into()),
-        };
-        drop(client_opts);
-        client.send_key(Key { key }).await?;
-        Ok(true)
+        keeper_server.keeper_client = Arc::new(RwLock::new(Some(KeeperClient::new(
+            Arc::clone(&keeper_server.backs),
+            Arc::clone(&keeper_server.addrs),
+            Arc::clone(&keeper_server.statuses),
+            Arc::clone(&keeper_server.end_positions),
+            Arc::clone(&keeper_server.pre_manage_range),
+            Arc::clone(&keeper_server.manage_range),
+            Arc::clone(&keeper_server.this),
+            Arc::clone(&keeper_server.timestamp),
+            Arc::clone(&keeper_server.key_list),
+            Arc::clone(&keeper_server.event_detected_by_this),
+            Arc::clone(&keeper_server.event_acked_by_successor),
+            Arc::clone(&keeper_server.acknowledging_time),
+            Arc::clone(&keeper_server.event_handling_mutex),
+            Arc::clone(&keeper_server.initializing),
+            Arc::clone(&keeper_server.client_opts),
+        ))));
+        return keeper_server;
     }
 }
 
@@ -303,31 +146,49 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
             let return_initializing = initializing.clone();
             drop(initializing);
             return Ok(Response::new(Acknowledgement {
-                event: "".to_string(),
+                event_type: "None".to_string(),
+                back_idx: 0,
                 initializing: return_initializing,
             }));
         }
 
         // step 2: join after knowing other keepers are not initializing
-        let guard = self.mutex.lock();
+        let guard = self.event_handling_mutex.lock();
         let current_time = Instant::now();
-        let detecting_time = self.detecting_time.read().await;
-        let mut return_event = "".to_string();
-        if current_time.duration_since(*detecting_time) < Duration::new(10, 0) {
+
+        let event_detected_by_this = self.event_detected_by_this.read().await;
+        let event_detected = event_detected_by_this.as_ref().unwrap();
+        let mut return_event = "None".to_string();
+        let mut back_idx = 0;
+        let detecting_time = event_detected.timestamp;
+        if current_time.duration_since(detecting_time) < Duration::new(10, 0) {
             let mut acknowledging_time = self.acknowledging_time.write().await;
             *acknowledging_time = Instant::now();
-            let detecting_event = self.detecting_event.read().await;
-            return_event = detecting_event.clone();
-            drop(detecting_time);
-            drop(acknowledging_time);
-            drop(detecting_event);
+            match event_detected.event_type {
+                BackendEventType::None => {
+                    return_event = "None".to_string();
+                }
+                BackendEventType::Join => {
+                    return_event = "Join".to_string();
+                    back_idx = event_detected.back_idx;
+                }
+                BackendEventType::Leave => {
+                    return_event = "Leave".to_string();
+                    back_idx = event_detected.back_idx;
+                }
+            }
         }
         let initializing = self.initializing.read().await;
         let return_initializing = initializing.clone();
+
+        // should update the range here!!!!
+
+        drop(event_detected_by_this);
         drop(initializing);
         drop(guard);
         return Ok(Response::new(Acknowledgement {
-            event: return_event,
+            event_type: return_event,
+            back_idx: back_idx as u64,
             initializing: return_initializing,
         }));
     }
@@ -349,3 +210,7 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
 // When a keeper joins, it needs to know if it's at the starting phase.
 // 1) If it finds a working keeper => normal join
 // 2) else => starting phase
+
+// TODO
+// sync the fields
+// separate the two structs

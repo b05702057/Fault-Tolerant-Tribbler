@@ -21,8 +21,9 @@ message Bool {
 }
 
 message Acknowledgement {
-    string event = 1; // backend event
-    bool initializing = 2; // whether the server is initializing
+    string event_type = 1; // backend event
+    uint64 back_idx = 2;
+    bool initializing = 3; // whether the server is initializing
 }
 
 service TribStorage {
