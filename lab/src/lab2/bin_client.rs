@@ -25,7 +25,7 @@ pub struct BinClient {
     pub client_opt_pools:
         Vec<Vec<Arc<RwLock<Option<TribStorageClient<tonic::transport::Channel>>>>>>,
 
-    pub live_http_back_addrs: Arc<RwLock<Vec<String>>>,
+    pub live_back_indices_arc: Arc<RwLock<Vec<usize>>>,
 }
 
 impl BinClient {
@@ -45,7 +45,7 @@ impl BinClient {
                 vec![Arc::new(RwLock::new(None)); NUM_CLIENTS_SHARED_PER_BACKEND];
                 back_addrs_len
             ],
-            live_http_back_addrs: Arc::new(RwLock::new(vec![])),
+            live_back_indices_arc: Arc::new(RwLock::new(vec![])),
         };
 
         // Prepare resources needed for periodic scanning
@@ -53,13 +53,13 @@ impl BinClient {
         for http_addr in ret_obj.http_back_addrs.iter() {
             clients_for_scanning_arcs.push(Arc::new(StorageClient::new(http_addr)));
         }
-        let live_http_back_addrs_arc = Arc::clone(&ret_obj.live_http_back_addrs);
+        let live_back_indices_arc = Arc::clone(&ret_obj.live_back_indices_arc);
         let http_back_addrs_clone = ret_obj.http_back_addrs.clone();
 
         tokio::spawn(async move {
             Self::periodic_scan(
                 http_back_addrs_clone,
-                live_http_back_addrs_arc,
+                live_back_indices_arc,
                 clients_for_scanning_arcs,
             )
             .await
@@ -68,9 +68,10 @@ impl BinClient {
         ret_obj
     }
 
+    // Assumes order of http_back_addrs the same everywhere
     async fn periodic_scan(
         http_back_addrs: Vec<String>,
-        live_http_back_addrs_arc: Arc<RwLock<Vec<String>>>,
+        live_back_indices_arc: Arc<RwLock<Vec<usize>>>,
         clients_for_scanning: Vec<Arc<StorageClient>>,
     ) -> TribResult<()> {
         let mut now = std::time::Instant::now();
@@ -94,7 +95,7 @@ impl BinClient {
                 })
                 .collect();
 
-            let mut temp_live_http_back_addrs = vec![];
+            let mut temp_live_back_indices = vec![];
 
             // Note chaining of "??" is needed. One is for the tokio's spawned task error
             // capturing (a Result<>) and the other is from our connect() function which
@@ -102,7 +103,7 @@ impl BinClient {
             for (back_vec_idx, task) in tasks.into_iter().enumerate() {
                 // If connection successful, then server is live
                 match task.await? {
-                    Ok(_) => temp_live_http_back_addrs.push(http_back_addrs[back_vec_idx].clone()),
+                    Ok(_) => temp_live_back_indices.push(back_vec_idx),
                     Err(_) => (),
                 }
             }
@@ -113,12 +114,12 @@ impl BinClient {
             );
             println!(
                 "[DEBUGGING] bin_client's periodic_scan: live_addrs.len(): {}",
-                temp_live_http_back_addrs.len()
+                temp_live_back_indices.len()
             );
 
-            let mut live_http_back_addrs = live_http_back_addrs_arc.write().await;
-            *live_http_back_addrs = temp_live_http_back_addrs;
-            drop(live_http_back_addrs); // Important to drop lock, don't hold across sleep below
+            let mut live_indices = live_back_indices_arc.write().await;
+            *live_indices = temp_live_back_indices;
+            drop(live_indices); // Important to drop lock, don't hold across sleep below
 
             // Wait interval til next scan
             tokio::time::sleep(BIN_CLIENT_SCANNING_BACKEND_INTERVAL).await;
@@ -152,7 +153,7 @@ impl BinStorage for BinClient {
 
         let client_opt = Arc::clone(&self.client_opt_pools[client_idx as usize][rand_idx_in_pool]);
 
-        // // TODO: change initialization to 
+        // // TODO: change initialization to
         // client_opt_pools: vec![
         //     vec![Arc::new(RwLock::new(None)); back_addrs_len];
         //     NUM_CLIENTS_SHARED_PER_BACKEND
@@ -165,7 +166,6 @@ impl BinStorage for BinClient {
         //         client_opt,
         //     )));
         // }
-        
 
         Ok(Box::new(StorageClientMapperWrapper {
             bin_name: escaped_name.to_string(),
