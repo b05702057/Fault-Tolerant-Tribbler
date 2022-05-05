@@ -6,7 +6,7 @@ use tribbler::{config::KeeperConfig, err::TribResult, storage::BinStorage, trib:
 /// underlying storage system.
 #[allow(unused_variables)]
 pub async fn new_bin_client(backs: Vec<String>) -> TribResult<Box<dyn BinStorage>> {
-    Ok(Box::new(BinClient::new(backs)))
+    Ok(Box::new(BinClient::new(backs).await?))
 }
 
 /// this async function accepts a [KeeperConfig] that should be used to start

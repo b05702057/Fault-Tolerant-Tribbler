@@ -167,3 +167,6 @@
 //! if they feel the need.
 //!
 //! Happy Lab 3. :-)
+pub mod fault_tolerance_client;
+mod storage_structs;
+pub use crate::lab3::fault_tolerance_client::StorageFaultToleranceClient;
