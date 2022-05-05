@@ -114,6 +114,7 @@ impl KeeperServer {
                 live_backend_indices_in_range: vec![],
             })),
             latest_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
+            predecessor_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
             ack_to_predecessor_time: Arc::new(RwLock::new(None)),
             event_acked_by_successor: Arc::new(RwLock::new(None)),
             event_detected_by_this: Arc::new(RwLock::new(None)),
@@ -122,8 +123,8 @@ impl KeeperServer {
     }
 
     fn is_same_backend_event(
-        earlier_backend_event: BackendEvent,
-        later_backend_event: BackendEvent,
+        earlier_backend_event: &BackendEvent,
+        later_backend_event: &BackendEvent,
     ) -> bool {
         // Must be same event type and backend idx to have a chance of being same event
         if later_backend_event.back_idx != earlier_backend_event.back_idx
@@ -384,16 +385,16 @@ impl KeeperServer {
                     // If our successor acked to us the event (recently), let successor do it
                     if let Some(event_acked_by_successor) = event_acked_by_successor_opt {
                         // If acked by successor, then successor is handling it.
-                        if Self::is_same_backend_event(event_acked_by_successor, event) {
+                        if Self::is_same_backend_event(&event_acked_by_successor, &event) {
                             should_handle_event = false;
                         }
                     }
 
                     if should_handle_event {
                         // Remeber that we will be processing this event for future ACKs to predecessor.
-                        let event_detected_by_us_lock = event_detected_by_us.write().await;
-                        *event_detected_by_us_lock = event.clone();
-                        drop(event_detected_by_us_lock);
+                        let mut event_detected_by_this_lock = event_detected_by_this.write().await;
+                        *event_detected_by_this_lock = Some(event.clone());
+                        drop(event_detected_by_this_lock);
                     }
 
                     drop(event_handling_mutex_lock);
