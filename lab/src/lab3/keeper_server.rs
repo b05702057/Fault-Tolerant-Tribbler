@@ -181,8 +181,52 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
         let initializing = self.initializing.read().await;
         let return_initializing = initializing.clone();
 
-        // should update the range here!!!!
-
+        // change the state of the predecessor
+        let mut statuses = self.statuses.write().await;
+        statuses[received_request.idx as usize] = true;
+        let this = self.this.read().await;
+        // get end positions of alive keepers
+        let addrs = self.addrs.read().await;
+        let mut alive_vector = Vec::<u64>::new();
+        let end_positions = self.end_positions.read().await;
+        for idx in 0..addrs.len() {
+            if statuses[idx] {
+                alive_vector.push(end_positions[idx]);
+            }
+        }
+        // get the range
+        let mut pre_manage_range = self.pre_manage_range.write().await;
+        let mut manage_range = self.manage_range.write().await;
+        let alive_num = alive_vector.len();
+        if alive_num == 1 {
+            *pre_manage_range = (
+                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
+                end_positions[*this],
+            );
+            *manage_range = (
+                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
+                end_positions[*this],
+            );
+        } else {
+            for idx in 0..alive_num {
+                if alive_vector[idx] == end_positions[*this] {
+                    let start_idx = ((idx - 1) + alive_num) % alive_num;
+                    let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
+                    *pre_manage_range = (
+                        (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM,
+                        alive_vector[start_idx],
+                    );
+                    *manage_range = (
+                        (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM,
+                        alive_vector[idx],
+                    );
+                }
+            }
+        }
+        drop(this);
+        drop(addrs);
+        drop(pre_manage_range);
+        drop(manage_range);
         drop(event_detected_by_this);
         drop(initializing);
         drop(guard);

@@ -284,6 +284,9 @@ impl KeeperClient {
             // scan to maintain the backends
             todo!();
         }
+        let mut initializing = self.initializing.write().await;
+        *initializing = false;
+        drop(initializing);
         Ok(true) // can send the ready signal
     }
 }
