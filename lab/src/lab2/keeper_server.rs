@@ -41,7 +41,7 @@ pub struct KeeperServer {
     /// The addresses of keepers
     pub keeper_addrs: Vec<String>,
     /// The index of this back-end
-    pub this_back_index: usize,
+    pub this: usize,
     /// Non zero incarnation identifier
     pub id: u128,
     /// Send a value when the keeper is ready. The distributed key-value
@@ -64,13 +64,22 @@ pub struct KeeperServer {
     pub live_backends_view: Arc<RwLock<LiveBackendsView>>,
     /// Latest range known to monitor / range to use for next scan
     /// Note it may be start_idx > end_idx in which case we need to wrap around
+    /// Range is assumed to be based on the backend list length.
     pub latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
 
+    /// Latest range known to monitor / range to use for next scan
+    /// Note it may be start_idx > end_idx in which case we need to wrap around
+    /// Range is assumed to be based on the backend list length.
+    pub predecessor_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+
     /// Last time we sent ack to predecessor who was requesting join intialization
-    pub recent_keeper_join_ACK_time: Arc<RwLock<Option<Instant>>>,
+    pub ack_to_predecessor_time: Arc<RwLock<Option<Instant>>>,
 
     /// Event last Acked by successor
     pub event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
+
+    /// Event detected by us
+    pub event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
 
     /// To lock before code that uses data for event handling negotiation between
     /// predecessor and successor
@@ -94,7 +103,7 @@ impl KeeperServer {
             http_back_addrs: http_back_addrs,
             storage_clients: storage_clients,
             keeper_addrs: kc.addrs,
-            this_back_index: kc.this,
+            this: kc.this,
             id: kc.id,
             ready_sender_opt: kc.ready,
             shutdown_receiver_opt: kc.shutdown,
@@ -105,8 +114,9 @@ impl KeeperServer {
                 live_backend_indices_in_range: vec![],
             })),
             latest_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
-            recent_keeper_join_ACK_time: Arc::new(RwLock::new(None)),
+            ack_to_predecessor_time: Arc::new(RwLock::new(None)),
             event_acked_by_successor: Arc::new(RwLock::new(None)),
+            event_detected_by_this: Arc::new(RwLock::new(None)),
             event_handling_mutex: Arc::new(Mutex::new(0)),
         })
     }
@@ -135,8 +145,9 @@ impl KeeperServer {
         latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>, // expect to be latest_monitoring_range_inclusive
         should_shutdown: Arc<RwLock<bool>>,
         keeper_clock: Arc<RwLock<u64>>,
-        recent_keeper_join_ACK_time: Arc<RwLock<Option<Instant>>>,
+        ack_to_predecessor_time: Arc<RwLock<Option<Instant>>>,
         event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
+        event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
         event_handling_mutex: Arc<Mutex<u64>>,
     ) -> TribResult<()> {
         // To synchronize backends. Initialize to 0
@@ -316,7 +327,7 @@ impl KeeperServer {
                     //------------------ Start of large ATOMIC section------------------------
                     let event_handling_mutex_lock = event_handling_mutex.lock().await;
 
-                    let last_ack_time_lock = recent_keeper_join_ACK_time.read().await;
+                    let last_ack_time_lock = ack_to_predecessor_time.read().await;
                     let last_ack_time_opt = *last_ack_time_lock;
                     drop(last_ack_time_lock);
 
@@ -376,6 +387,13 @@ impl KeeperServer {
                         if Self::is_same_backend_event(event_acked_by_successor, event) {
                             should_handle_event = false;
                         }
+                    }
+
+                    if should_handle_event {
+                        // Remeber that we will be processing this event for future ACKs to predecessor.
+                        let event_detected_by_us_lock = event_detected_by_us.write().await;
+                        *event_detected_by_us_lock = event.clone();
+                        drop(event_detected_by_us_lock);
                     }
 
                     drop(event_handling_mutex_lock);

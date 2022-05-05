@@ -5,3 +5,28 @@ syntax = "proto3";
 package keeper;
 
 // Add your message and service definitions below this line
+message Clock {
+    uint64 timestamp = 1;
+    uint64 idx = 2;
+    bool initializing = 3;
+    uint64 step = 4; // step 1 or step 2 of initialization
+}
+
+message Key {
+    string key = 1;
+}
+
+message Bool {
+    bool value = 1;
+}
+
+message Acknowledgement {
+    string event_type = 1; // backend event
+    uint64 back_idx = 2;
+    bool initializing = 3; // whether the server is initializing
+}
+
+service KeeperRpc {
+    rpc sendClock(Clock) returns (Acknowledgement);
+    rpc sendKey(Key) returns (Bool);
+}
