@@ -54,11 +54,9 @@ impl BinClient {
             clients_for_scanning_arcs.push(Arc::new(StorageClient::new(http_addr)));
         }
         let live_back_indices_arc = Arc::clone(&ret_obj.live_back_indices_arc);
-        let http_back_addrs_clone = ret_obj.http_back_addrs.clone();
 
         tokio::spawn(async move {
             Self::periodic_scan(
-                http_back_addrs_clone,
                 live_back_indices_arc,
                 clients_for_scanning_arcs,
             )
@@ -70,7 +68,6 @@ impl BinClient {
 
     // Assumes order of http_back_addrs the same everywhere
     async fn periodic_scan(
-        http_back_addrs: Vec<String>,
         live_back_indices_arc: Arc<RwLock<Vec<usize>>>,
         clients_for_scanning: Vec<Arc<StorageClient>>,
     ) -> TribResult<()> {
@@ -109,8 +106,8 @@ impl BinClient {
             }
 
             println!(
-                "[DEBUGGING] bin_client's periodic_scan: http_back_addrs.len(): {}",
-                http_back_addrs.len()
+                "[DEBUGGING] bin_client's periodic_scan: clients_for_scanning.len(): {}",
+                clients_for_scanning.len()
             );
             println!(
                 "[DEBUGGING] bin_client's periodic_scan: live_addrs.len(): {}",
