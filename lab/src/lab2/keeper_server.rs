@@ -423,7 +423,7 @@ impl KeeperServer {
         loop {
             storage_clients_in_range.push(Arc::clone(&storage_clients[cur_back_idx]));
             // Break once idx at scan_range_end has been processed
-            if (cur_back_idx == scan_range_end) {
+            if cur_back_idx == scan_range_end {
                 break;
             }
             cur_back_idx = (cur_back_idx + 1) % storage_clients.len();
