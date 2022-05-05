@@ -1,21 +1,59 @@
+use std::cmp;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tribbler::config::KeeperConfig;
 
 use crate::{
     keeper,
-    keeper::{Address, Bool, Clock, Key},
+    keeper::{Acknowledgement, Bool, Clock, Key},
 };
 use async_trait::async_trait;
 use tonic::Response;
 
 pub struct KeeperServer {
-    pub timestamp: Arc<RwLock<u64>>,            // to sync
-    pub statuses: Arc<RwLock<Vec<bool>>>,       // the statuses of all keepers
+    pub addrs: Arc<RwLock<Vec<String>>>,
+    pub statuses: Arc<RwLock<Vec<bool>>>, // the statuses of all keepers
+    pub this: Arc<RwLock<usize>>,         // the index of this keeper
+    pub timestamp: Arc<RwLock<u64>>,      // to sync
     pub key_list: Arc<RwLock<HashSet<String>>>, // store the keys of finsihed lists as a helper
-    pub event_backend: Arc<RwLock<String>>,     // hold the lock when the keeper runs scan()
-    pub scan_count: Arc<RwLock<u64>>,           // count #scan since the clock is sent
+    pub detecting_event: Arc<RwLock<String>>, // hold the lock when the keeper runs scan()
+    pub detecting_time: Arc<RwLock<Instant>>,
+    pub acknowledging_time: Arc<RwLock<Instant>>,
+    pub scan_count: Arc<RwLock<u64>>, // count #scan since the clock is sent
+    pub initializing: Arc<RwLock<bool>>,
+    pub mutex: Mutex<u64>,
 }
+
+impl KeeperServer {
+    pub fn new(kc: KeeperConfig) -> KeeperServer {
+        let addrs = kc.addrs;
+        let this = kc.this;
+
+        let mut statuses = Vec::<bool>::new();
+        for _ in &addrs {
+            statuses.push(false);
+        }
+
+        KeeperServer {
+            addrs: Arc::new(RwLock::new(addrs)),
+            statuses: Arc::new(RwLock::new(statuses)),
+            this: Arc::new(RwLock::new(this)),
+            timestamp: Arc::new(RwLock::new(0)),
+            key_list: Arc::new(RwLock::new(HashSet::<String>::new())),
+            detecting_event: Arc::new(RwLock::new("".to_string())),
+            detecting_time: Arc::new(RwLock::new(Instant::now())),
+            acknowledging_time: Arc::new(RwLock::new(Instant::now())),
+            scan_count: Arc::new(RwLock::new(0)),
+            initializing: Arc::new(RwLock::new(true)),
+            mutex: Mutex::new(0),
+        }
+    }
+}
+
 // The below approach should handle most cases:
 // If an event happen after the ACK, the new keeper would handle it.
 // If an event happen before the ACK, the old keeper would handle it.
@@ -26,7 +64,7 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
     async fn send_clock(
         &self,
         request: tonic::Request<Clock>,
-    ) -> Result<tonic::Response<Address>, tonic::Status> {
+    ) -> Result<tonic::Response<Acknowledgement>, tonic::Status> {
         let received_request = request.into_inner();
 
         // store the timestamp from another keeper and use it to sync later
@@ -34,37 +72,42 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
         if received_request.timestamp > *cur_timestamp {
             drop(cur_timestamp);
             let mut cur_timestamp = self.timestamp.write().await;
-            *cur_timestamp = received_request.timestamp;
+            *cur_timestamp = cmp::max(*cur_timestamp, received_request.timestamp);
         }
 
-        // just a normal clock heartbeat
-        if !received_request.is_first_clock {
-            return Ok(Response::new(Address {
-                address: "".to_string(),
+        // 1) just a normal clock heartbeat
+        // 2) just checking if this keeper is initialziing
+        if !received_request.initializing || received_request.step == 1 {
+            let initializing = self.initializing.read().await;
+            let return_initializing = initializing.clone();
+            drop(initializing);
+            return Ok(Response::new(Acknowledgement {
+                event: "".to_string(),
+                initializing: return_initializing,
             }));
         }
 
-        // update the keeper status
-        let mut statuses = self.statuses.write().await;
-        statuses[received_request.idx as usize] = true;
-        drop(statuses);
-
-        // two scans
-        let mut scan_count = self.scan_count.write().await;
-        *scan_count = 0;
-        drop(scan_count);
-        let mut scan_count = self.scan_count.read().await;
-        while *scan_count < 2 {
-            drop(scan_count);
-            scan_count = self.scan_count.read().await;
+        // step 2: join after knowing other keepers are not initializing
+        let guard = self.mutex.lock();
+        let current_time = Instant::now();
+        let detecting_time = self.detecting_time.read().await;
+        let mut return_event = "".to_string();
+        if current_time.duration_since(*detecting_time) < Duration::new(10, 0) {
+            let mut acknowledging_time = self.acknowledging_time.write().await;
+            *acknowledging_time = Instant::now();
+            let detecting_event = self.detecting_event.read().await;
+            return_event = detecting_event.clone();
+            drop(detecting_time);
+            drop(acknowledging_time);
+            drop(detecting_event);
         }
-
-        // return the backend address
-        let event_backend = self.event_backend.read().await;
-        let return_address = event_backend.clone();
-        drop(event_backend);
-        return Ok(Response::new(Address {
-            address: return_address,
+        let initializing = self.initializing.read().await;
+        let return_initializing = initializing.clone();
+        drop(initializing);
+        drop(guard);
+        return Ok(Response::new(Acknowledgement {
+            event: return_event,
+            initializing: return_initializing,
         }));
     }
 
@@ -81,3 +124,10 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
         return Ok(Response::new(Bool { value: true }));
     }
 }
+
+// When a keeper joins, it waits for 5 secs.
+// During the 5 secs, if it receives no clock, that means it is the only initializing keeper.
+// If it receives an existing clock, it stops waiting and join.
+// If it receives initializing clocks, they initialize together.
+
+// When a keeper runs, it should always make sure its backend list aligns with the alive keeper list.

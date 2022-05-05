@@ -169,3 +169,4 @@
 //! Happy Lab 3. :-)
 mod keeper_client;
 mod keeper_server;
+mod lab;

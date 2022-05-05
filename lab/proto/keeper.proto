@@ -8,7 +8,8 @@ package keeper;
 message Clock {
     uint64 timestamp = 1;
     uint64 idx = 2;
-    bool is_first_clock = 3;
+    bool initializing = 3;
+    uint64 step = 4; // step 1 or step 2 of initialization
 }
 
 message Key {
@@ -19,11 +20,12 @@ message Bool {
     bool value = 1;
 }
 
-message Address {
-    string Address = 1;
+message Acknowledgement {
+    string event = 1; // backend event
+    bool initializing = 2; // whether the server is initializing
 }
 
 service TribStorage {
-    rpc sendClock(Clock) returns (Address);
+    rpc sendClock(Clock) returns (Acknowledgement);
     rpc sendKey(Key) returns (Bool);
 }
