@@ -1,5 +1,5 @@
 use crate::lab2::{bin_client::BinClient, trib_front::TribFront};
-use crate::lab3::{keeper_client::KeeperClient, keeper_server::KeeperServer};
+use crate::lab3::keeper_server::KeeperServer;
 use std::time::{Duration, Instant};
 use tribbler::{config::KeeperConfig, err::TribResult, storage::BinStorage, trib::Server};
 
@@ -21,24 +21,7 @@ pub async fn new_bin_client(backs: Vec<String>) -> TribResult<Box<dyn BinStorage
 /// started.
 #[allow(unused_variables)]
 pub async fn serve_keeper(kc: KeeperConfig) -> TribResult<()> {
-    // start sending and receiving heartbeats
-    let mut keeper_client = KeeperClient::new(KeeperConfig {
-        backs: kc.backs.clone(),
-        addrs: kc.addrs.clone(),
-        this: kc.this.clone(),
-        id: kc.id.clone(),
-        ready: kc.ready.clone(),
-        shutdown: None,
-    });
-    let mut keeper_server = KeeperServer::new(KeeperConfig {
-        backs: kc.backs,
-        addrs: kc.addrs,
-        this: kc.this,
-        id: kc.id,
-        ready: None,
-        shutdown: None,
-    });
-
+    let keeper_server = KeeperServer::new(kc);
     Ok(())
 
     // let back_addrs = kc.backs.clone();
