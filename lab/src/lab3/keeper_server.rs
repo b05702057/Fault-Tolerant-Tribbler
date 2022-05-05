@@ -5,7 +5,6 @@ use crate::{
 };
 
 use async_trait::async_trait;
-// use priority_queue::PriorityQueue;
 use std::cmp;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,11 +17,16 @@ use tonic::Response;
 use tribbler::config::KeeperConfig;
 use tribbler::err::TribResult;
 
+const MAX_BACKEND_NUM: u64 = 300;
 pub struct KeeperServer {
-    pub addrs: Arc<RwLock<Vec<String>>>,          // keeper addresses
-    pub statuses: Arc<RwLock<Vec<bool>>>,         // keeper statuses
-    pub this: Arc<RwLock<usize>>,                 // the index of this keeper
-    pub timestamp: Arc<RwLock<u64>>,              // timestamp of this keeper
+    pub backs: Arc<RwLock<Vec<String>>>,       // backend addresses
+    pub addrs: Arc<RwLock<Vec<String>>>,       // keeper addresses
+    pub statuses: Arc<RwLock<Vec<bool>>>,      // keeper statuses
+    pub end_positions: Arc<RwLock<Vec<u64>>>,  // keeper end positions on the ring
+    pub manage_range: Arc<RwLock<(u64, u64)>>, // keeper range
+    pub pre_manage_range: Arc<RwLock<(u64, u64)>>, // predecessor range
+    pub this: Arc<RwLock<usize>>,              // the index of this keeper
+    pub timestamp: Arc<RwLock<u64>>,           // timestamp of this keeper
     pub key_list: Arc<RwLock<HashSet<String>>>, // store the keys of finsihed lists to help migration
     pub detecting_event: Arc<RwLock<String>>,   // the most recent backend event
     pub detecting_time: Arc<RwLock<Instant>>,   // the time of the backend event
@@ -36,18 +40,28 @@ pub struct KeeperServer {
 
 impl KeeperServer {
     pub fn new(kc: KeeperConfig) -> KeeperServer {
+        let backs = kc.backs;
         let addrs = kc.addrs;
         let this = kc.this;
         let mut statuses = Vec::<bool>::new();
+        let mut end_positions = Vec::<u64>::new();
+        let manage_num = MAX_BACKEND_NUM / (addrs.len() as u64); // use 300 directly to avoid edge cases of using backs.len()
         let mut client_opts = Vec::<Option<TribStorageClient<tonic::transport::Channel>>>::new();
-        for _ in &addrs {
+        for idx in 0..addrs.len() {
             statuses.push(false);
+            let end_position = (idx as u64 + 1) * manage_num - 1;
+            end_positions.push(end_position);
             client_opts.push(None);
         }
+        statuses[this] = true;
 
         KeeperServer {
+            backs: Arc::new(RwLock::new(backs)),
             addrs: Arc::new(RwLock::new(addrs)),
             statuses: Arc::new(RwLock::new(statuses)),
+            end_positions: Arc::new(RwLock::new(end_positions)),
+            pre_manage_range: Arc::new(RwLock::new((0, 0))),
+            manage_range: Arc::new(RwLock::new((0, 0))),
             this: Arc::new(RwLock::new(this)),
             timestamp: Arc::new(RwLock::new(0)),
             key_list: Arc::new(RwLock::new(HashSet::<String>::new())),
@@ -63,13 +77,13 @@ impl KeeperServer {
     }
 
     pub async fn initialization(&self) -> TribResult<bool> {
-        // detect other keepers for 5 seconds
         let addrs = self.addrs.read().await;
         let this = self.this.read().await;
         let mut normal_join = false; // if this is a normal join operation
         let start_time = Instant::now();
         let mut current_time = Instant::now();
 
+        // detect other keepers for 5 seconds
         while current_time.duration_since(start_time) < Duration::new(5, 0) {
             for idx in 0..addrs.len() {
                 // only contact other keepers
@@ -101,38 +115,81 @@ impl KeeperServer {
             }
             current_time = Instant::now(); // reset current time
         }
+
+        // get end positions of alive keepers
+        let mut alive_vector = Vec::<u64>::new();
+        let statuses = self.statuses.read().await;
+        let end_positions = self.end_positions.read().await;
+        for idx in 0..addrs.len() {
+            if statuses[idx] {
+                alive_vector.push(end_positions[idx]);
+            }
+        }
+        // get the range
+        let mut pre_manage_range = self.pre_manage_range.write().await;
+        let mut manage_range = self.manage_range.write().await;
+        let alive_num = alive_vector.len();
+        if alive_num == 1 {
+            *pre_manage_range = (
+                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
+                end_positions[*this],
+            );
+            *manage_range = (
+                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
+                end_positions[*this],
+            );
+        } else {
+            for idx in 0..alive_num {
+                if alive_vector[idx] == end_positions[*this] {
+                    let start_idx = ((idx - 1) + alive_num) % alive_num;
+                    let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
+                    *pre_manage_range = (
+                        (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM,
+                        alive_vector[start_idx],
+                    );
+                    *manage_range = (
+                        (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM,
+                        alive_vector[idx],
+                    );
+                }
+            }
+        }
         drop(this);
         drop(addrs);
-
-        // prepare the scan range here!!!
-        // first find the predecessor
-        // then find the backend range for the predecessor and current keeper
+        drop(pre_manage_range);
+        drop(manage_range);
 
         if normal_join {
             // scan the backends and sleep for a specific amount of time
             // todo!();
-            thread::sleep(Duration::from_secs(4));
+            thread::sleep(Duration::from_secs(4)); // sleep after the first scan
 
             // find the successor
-            // let this = self.this.read().await;
-            // let addrs = self.addrs.read().await;
-            // let statuses = self.statuses.read().await;
-            // let mut alive_servers = PriorityQueue::new();
-            // for idx in 0..addrs.len() {
-            //     // ignore itself and dead servers
-            //     if idx == *this || !statuses[idx] {
-            //         continue;
-            //     }
+            let this = self.this.read().await;
+            let addrs = self.addrs.read().await;
+            let statuses = self.statuses.read().await;
+            let mut successor_index = *this;
+            for idx in *this + 1..addrs.len() {
+                if statuses[idx] {
+                    successor_index = idx;
+                    break;
+                }
+            }
+            drop(addrs);
+            // hasn't find the successor yet
+            if successor_index == *this {
+                for idx in 0..*this {
+                    if statuses[idx] {
+                        successor_index = idx;
+                        break;
+                    }
+                }
+            }
+            drop(statuses);
 
-            //     if idx > *this {
-            //         alive_servers.push(idx, *this - idx);
-            //     } else {
-            //         alive_servers.push(idx, *this - idx - addrs.len());
-            //     }
-            // }
-
-            for idx in 0..addrs.len() {
-                let acknowledgement = self.client_send_clock(idx, true, 2).await; // step 2
+            // found a successor => get the acknowledged event
+            if successor_index != *this {
+                let acknowledgement = self.client_send_clock(successor_index, true, 2).await; // step 2
                 match acknowledgement {
                     // alive
                     Ok(acknowledgement) => {
@@ -144,7 +201,6 @@ impl KeeperServer {
                             let mut acknowledged_time = self.acknowledged_time.write().await;
                             *acknowledged_time = Instant::now();
                             drop(acknowledged_time);
-                            break; // only the successor
                         }
                     }
                     // down
@@ -152,7 +208,8 @@ impl KeeperServer {
                 }
             }
         } else {
-            // scan and maintain the backend list based on statuses
+            // starting phase
+            // scan to maintain the backends
             todo!();
         }
         Ok(true) // can send the ready signal
@@ -171,6 +228,7 @@ impl KeeperServer {
         Ok(())
     }
 
+    // send clock to other keepers to maintain the keeper view
     pub async fn client_send_clock(
         &self,
         idx: usize,
@@ -203,6 +261,7 @@ impl KeeperServer {
         Ok(acknowledgement.into_inner())
     }
 
+    // send keys of finished lists
     pub async fn client_send_key(&self, idx: usize, key: String) -> TribResult<bool> {
         // client_opt is a tokio::sync::OwnedMutexGuard
         let client_opts = Arc::clone(&self.client_opts).lock_owned().await;
@@ -221,11 +280,6 @@ impl KeeperServer {
     }
 }
 
-// The below approach should handle most cases:
-// If an event happen after the ACK, the new keeper would handle it.
-// If an event happen before the ACK, the old keeper would handle it.
-// When a heatbeat is recieved, the old keeper sends ACK after the next scan and remove the backends.
-
 #[async_trait]
 impl keeper::trib_storage_server::TribStorage for KeeperServer {
     async fn send_clock(
@@ -243,7 +297,7 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
         }
 
         // 1) just a normal clock heartbeat
-        // 2) just checking if this keeper is initialziing
+        // 2) just checking if this keeper is initialziing (step 1 of initialization)
         if !received_request.initializing || received_request.step == 1 {
             let initializing = self.initializing.read().await;
             let return_initializing = initializing.clone();
@@ -292,9 +346,6 @@ impl keeper::trib_storage_server::TribStorage for KeeperServer {
     }
 }
 
-// When a keeper joins, it waits for 5 secs.
-// During the 5 secs, if it receives no clock, that means it is the only initializing keeper.
-// If it receives an existing clock, it stops waiting and join.
-// If it receives initializing clocks, they initialize together.
-
-// When a keeper runs, it should always make sure its backend list aligns with the alive keeper list.
+// When a keeper joins, it needs to know if it's at the starting phase.
+// 1) If it finds a working keeper => normal join
+// 2) else => starting phase
