@@ -2,6 +2,7 @@ use super::migration::migration_event;
 use crate::keeper::keeper_rpc_client::KeeperRpcClient;
 use crate::lab1::client::StorageClient;
 use std::collections::{HashMap, HashSet};
+use std::iter::successors;
 use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::Receiver, Mutex, RwLock};
@@ -1272,24 +1273,10 @@ impl KeeperServer {
 
         if normal_join {
             // find the successor
-            let statuses = statuses.read().await;
-            let mut successor_index = this;
-            for idx in this + 1..keeper_num {
-                if statuses[idx] {
-                    successor_index = idx;
-                    break;
-                }
-            }
-            // hasn't find the successor yet
-            if successor_index == this {
-                for idx in 0..this {
-                    if statuses[idx] {
-                        successor_index = idx;
-                        break;
-                    }
-                }
-            }
-            drop(statuses);
+            let statuses_lock = statuses.read().await;
+            let statuses = statuses_lock.clone();
+            drop(statuses_lock);
+            let successor_index = Self::find_successor_index(statuses, this, keeper_num);
 
             // found a successor => get the acknowledged event
             if successor_index != this {
@@ -1335,6 +1322,26 @@ impl KeeperServer {
         *initializing = false;
         drop(initializing);
         Ok(true) // can send the ready signal
+    }
+
+    pub fn find_successor_index(statuses: Vec<bool>, this: usize, keeper_num: usize) -> usize {
+        let mut successor_index = this;
+        for idx in this + 1..keeper_num {
+            if statuses[idx] {
+                successor_index = idx;
+                break;
+            }
+        }
+        // hasn't find the successor yet
+        if successor_index == this {
+            for idx in 0..this {
+                if statuses[idx] {
+                    successor_index = idx;
+                    break;
+                }
+            }
+        }
+        return successor_index;
     }
 
     // monitor the statuses of other keepers and update the backend ranges
@@ -1408,6 +1415,15 @@ impl KeeperServer {
                             Some(predecessor_index) => {
                                 if predecessor_index == idx {
                                     // call the take over function
+                                    let mut successor_index = None;
+                                    let found_index = Self::find_successor_index(
+                                        statuses.clone(),
+                                        this,
+                                        keeper_addrs.len(),
+                                    );
+                                    if found_index != this {
+                                        successor_index = Some(found_index);
+                                    }
 
                                     let successor_keeper_client: Option<KeeperRpcClient<tonic::transport::channel>> = ;
 
