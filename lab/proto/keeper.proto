@@ -26,7 +26,7 @@ message Acknowledgement {
     bool initializing = 3; // whether the server is initializing
 }
 
-service TribStorage {
+service KeeperRpc {
     rpc sendClock(Clock) returns (Acknowledgement);
     rpc sendKey(Key) returns (Bool);
 }
