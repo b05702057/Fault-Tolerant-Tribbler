@@ -1409,10 +1409,15 @@ impl KeeperServer {
                                 if predecessor_index == idx {
                                     // call the take over function
 
+                                    let successor_keeper_client: Option<KeeperRpcClient<tonic::transport::channel>> = ;
+
+
                                     Self::take_over_pred_event_handling_if_needed(
                                         predecessor_event_detected.clone(),
                                         clients_for_scanning.clone(),
                                         log_entries.clone(),
+                                        successor_keeper_client.clone(),
+                                        keeper_clock.clone(),
                                     )
                                     .await;
                                 }
@@ -1440,6 +1445,8 @@ impl KeeperServer {
         predecessor_event_detected: Arc<RwLock<Option<BackendEvent>>>,
         clients_for_scanning: Vec<Arc<StorageClient>>, // all backend's clients
         log_entries: Arc<RwLock<Vec<LogEntry>>>,
+        successor_keeper_client: TODO TYPE,
+        keeper_clock: Arc<RwLock<u64>>,
     ) -> TribResult<()> {
         let pred_event_lock = predecessor_event_detected.write().await;
         let pred_event = pred_event_lock.clone();
@@ -1485,7 +1492,12 @@ impl KeeperServer {
         drop(logs_done_lock);
 
         let storage_client_clones = clients_for_scanning.clone();
-        // TODO Call migration
+
+        let keeper_clock_lock = keeper_clock.read().await;
+        let last_keeper_clock = *keeper_clock_lock;
+        drop(keeper_clock_lock);
+
+        // TODO Call migration using storage_client_clones, all_live_back_indices, last_keeper_clock, successor_keeper_client
 
         Ok(())
     }
