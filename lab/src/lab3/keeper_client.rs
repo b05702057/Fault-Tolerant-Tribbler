@@ -4,28 +4,29 @@ use crate::{
     keeper::{Acknowledgement, Bool, Clock, Key},
     lab3::keeper_server::BackendEvent,
     lab3::keeper_server::BackendEventType,
+    lab3::keeper_server::LogEntry,
 };
 
 use async_trait::async_trait;
 use std::cmp;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::time::sleep;
 use tribbler::err::TribResult;
 
 const MAX_BACKEND_NUM: u64 = 300;
 pub struct KeeperClient {
-    pub backs: Arc<RwLock<Vec<String>>>,        // backend addresses
-    pub keeper_addrs: Arc<RwLock<Vec<String>>>, // keeper addresses
-    pub statuses: Arc<RwLock<Vec<bool>>>,       // keeper statuses
-    pub end_positions: Arc<RwLock<Vec<u64>>>,   // keeper end positions on the ring
-    pub this: Arc<RwLock<usize>>,               // the index of this keeper
-    pub keeper_clock: Arc<RwLock<u64>>,         // keeper_clock of this keeper
-    pub key_list: Arc<RwLock<HashSet<String>>>, // store the keys of finsihed lists to help migration
+    pub backs: Arc<RwLock<Vec<String>>>,         // backend addresses
+    pub keeper_addrs: Arc<RwLock<Vec<String>>>,  // keeper addresses
+    pub statuses: Arc<RwLock<Vec<bool>>>,        // keeper statuses
+    pub end_positions: Arc<RwLock<Vec<u64>>>,    // keeper end positions on the ring
+    pub this: Arc<RwLock<usize>>,                // the index of this keeper
+    pub keeper_clock: Arc<RwLock<u64>>,          // keeper_clock of this keeper
+    pub log_entries: Arc<RwLock<Vec<LogEntry>>>, // store the keys of finsihed lists to help migration
     pub event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
     pub event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
     pub latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
@@ -44,7 +45,7 @@ impl KeeperClient {
         end_positions: Arc<RwLock<Vec<u64>>>,
         this: Arc<RwLock<usize>>,
         keeper_clock: Arc<RwLock<u64>>,
-        key_list: Arc<RwLock<HashSet<String>>>,
+        log_entries: Arc<RwLock<Vec<LogEntry>>>,
         event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
         event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
         latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
@@ -61,7 +62,7 @@ impl KeeperClient {
             end_positions,
             this,
             keeper_clock,
-            key_list,
+            log_entries,
             event_detected_by_this,
             event_acked_by_successor,
             latest_monitoring_range_inclusive,
@@ -79,10 +80,12 @@ impl KeeperClient {
         let mut keeper_client_opts = Arc::clone(&self.keeper_client_opts).lock_owned().await;
         // To prevent unnecessary reconnection, we only connect if we haven't.
         if let None = keeper_client_opts[idx] {
-            let addr = &self.keeper_addrs.read().await[idx];
-            keeper_client_opts[idx] = Some(KeeperRpcClient::connect(addr.clone()).await?);
-            drop(addr);
+            let keeper_addr_lock = &self.keeper_addrs.read().await[idx];
+            let keeper_addr = keeper_addr_lock.clone();
+            drop(keeper_addr_lock);
+            keeper_client_opts[idx] = Some(KeeperRpcClient::connect(keeper_addr.clone()).await?);
         }
+        drop(keeper_client_opts);
         Ok(())
     }
 
@@ -93,9 +96,8 @@ impl KeeperClient {
         initializing: bool,
         step: u64,
     ) -> TribResult<Acknowledgement> {
-        // client_opt is a tokio::sync::OwnedMutexGuard
-        let keeper_client_opts = Arc::clone(&self.keeper_client_opts).lock_owned().await;
         self.connect(idx).await?;
+        let keeper_client_opts = Arc::clone(&self.keeper_client_opts).lock_owned().await;
         let client_opt = &keeper_client_opts[idx];
 
         // Note the client_opt lock guard previously acquired will be held throughout this call, preventing concurrency issues.
@@ -104,26 +106,26 @@ impl KeeperClient {
             Some(client) => client.clone(),
             None => return Err("Client was somehow not connected / be initialized!".into()),
         };
-        drop(keeper_client_opts);
+        drop(keeper_client_opts); // client_opt needs the lock
 
-        let timestamp = self.keeper_clock.read().await;
+        let keeper_clock_lock = self.keeper_clock.read().await;
+        let keeper_clock = keeper_clock_lock.clone();
+        drop(keeper_clock_lock);
         let acknowledgement = client
             .send_clock(Clock {
-                timestamp: *timestamp,
-                idx: idx.try_into().unwrap(),
+                timestamp: keeper_clock,
+                idx: idx as u64,
                 initializing,
                 step,
             })
             .await?;
-        drop(timestamp);
         Ok(acknowledgement.into_inner())
     }
 
     // send keys of finished lists
     pub async fn send_key(&self, idx: usize, key: String) -> TribResult<bool> {
-        // client_opt is a tokio::sync::OwnedMutexGuard
-        let keeper_client_opts = Arc::clone(&self.keeper_client_opts).lock_owned().await;
         self.connect(idx).await?;
+        let keeper_client_opts = Arc::clone(&self.keeper_client_opts).lock_owned().await;
         let client_opt = &keeper_client_opts[idx];
 
         // Note the client_opt lock guard previously acquired will be held throughout this call, preventing concurrency issues.
@@ -132,14 +134,20 @@ impl KeeperClient {
             Some(client) => client.clone(),
             None => return Err("Client was somehow not connected / be initialized!".into()),
         };
-        drop(keeper_client_opts);
+        drop(keeper_client_opts); // client_opt needs the lock
         client.send_key(Key { key }).await?;
         Ok(true)
     }
 
     pub async fn initialization(&self) -> TribResult<bool> {
-        let addrs = self.keeper_addrs.read().await;
-        let this = self.this.read().await;
+        let addrs_lock = self.keeper_addrs.read().await;
+        let addrs = addrs_lock.clone();
+        drop(addrs_lock);
+
+        let this_lock = self.this.read().await;
+        let this = this_lock.clone();
+        drop(this_lock);
+
         let mut normal_join = false; // if this is a normal join operation
         let start_time = Instant::now();
         let mut current_time = Instant::now();
@@ -148,7 +156,7 @@ impl KeeperClient {
         while current_time.duration_since(start_time) < Duration::new(5, 0) {
             for idx in 0..addrs.len() {
                 // only contact other keepers
-                if idx == *this {
+                if idx == this {
                     continue;
                 }
                 // check acknowledgement
@@ -176,31 +184,34 @@ impl KeeperClient {
             }
             current_time = Instant::now(); // reset current time
         }
-        drop(this);
-        drop(addrs);
         // update the range
         let _update_result = self.update_ranges().await;
 
         if normal_join {
             // scan the backends and sleep for a specific amount of time
             // todo!();
-            thread::sleep(Duration::from_secs(4)); // sleep after the first scan
+            sleep(Duration::from_secs(4)); // sleep after the first scan
 
             // find the successor
-            let this = self.this.read().await;
-            let addrs = self.keeper_addrs.read().await;
+            let this_lock = self.this.read().await;
+            let this = this_lock.clone();
+            drop(this_lock);
+
+            let addrs_lock = self.keeper_addrs.read().await;
+            let addrs = addrs_lock.clone();
+            drop(addrs_lock);
+
             let statuses = self.statuses.read().await;
-            let mut successor_index = *this;
-            for idx in *this + 1..addrs.len() {
+            let mut successor_index = this;
+            for idx in this + 1..addrs.len() {
                 if statuses[idx] {
                     successor_index = idx;
                     break;
                 }
             }
-            drop(addrs);
             // hasn't find the successor yet
-            if successor_index == *this {
-                for idx in 0..*this {
+            if successor_index == this {
+                for idx in 0..this {
                     if statuses[idx] {
                         successor_index = idx;
                         break;
@@ -210,7 +221,7 @@ impl KeeperClient {
             drop(statuses);
 
             // found a successor => get the acknowledged event
-            if successor_index != *this {
+            if successor_index != this {
                 let acknowledgement = self.send_clock(successor_index, true, 2).await; // step 2
                 match acknowledgement {
                     // alive
@@ -233,17 +244,18 @@ impl KeeperClient {
                             *event_acked_by_successor = Some(backend_event);
                             drop(event_acked_by_successor);
                         }
+                        // no need to store anything if the event is "None"
                     }
-                    // down
+                    // Since this keeper just join, it's not possible that it's successor dies now.
                     Err(_) => (),
                 }
             }
-            drop(this);
         } else {
             // starting phase
             // scan to maintain the backends
             todo!();
         }
+        // finish initialization
         let mut initializing = self.initializing.write().await;
         *initializing = false;
         drop(initializing);
@@ -251,46 +263,58 @@ impl KeeperClient {
     }
 
     pub async fn update_ranges(&self) -> TribResult<()> {
-        let keeper_addrs = self.keeper_addrs.read().await;
-        let end_positions = self.end_positions.read().await;
-        let statuses = self.statuses.read().await;
-        let this = self.this.read().await;
-        let mut predecessor_monitoring_range_inclusive =
-            self.predecessor_monitoring_range_inclusive.write().await;
-        let mut latest_monitoring_range_inclusive =
-            self.latest_monitoring_range_inclusive.write().await;
-        let backs = self.backs.read().await;
-        let mut alive_vector = Vec::<u64>::new();
+        let keeper_addrs_lock = self.keeper_addrs.read().await;
+        let keeper_addrs = keeper_addrs_lock.clone();
+        drop(keeper_addrs_lock);
+
+        let end_positions_lock = self.end_positions.read().await;
+        let end_positions = end_positions_lock.clone();
+        drop(end_positions_lock);
+
+        let statuses_lock = self.statuses.read().await;
+        let statuses = statuses_lock.clone();
+        drop(statuses_lock);
+
+        let this_lock = self.this.read().await;
+        let this = this_lock.clone();
+        drop(this);
+
+        let backs_lock = self.backs.read().await;
+        let backs = backs_lock.clone();
         let back_num = backs.len();
+        drop(backs_lock);
+
         // get end positions of alive keepers
+        let mut alive_vector = Vec::<u64>::new();
         for idx in 0..keeper_addrs.len() {
             if statuses[idx] {
                 alive_vector.push(end_positions[idx]);
             }
         }
         // get the range
+        let mut predecessor_monitoring_range_inclusive =
+            self.predecessor_monitoring_range_inclusive.write().await;
+        let mut latest_monitoring_range_inclusive =
+            self.latest_monitoring_range_inclusive.write().await;
         let alive_num = alive_vector.len();
         if alive_num == 1 {
-            let end_position = end_positions[*this];
+            *predecessor_monitoring_range_inclusive = None;
+            let end_position = end_positions[this];
             let start_position = (end_position + 1) % MAX_BACKEND_NUM;
             if start_position >= back_num as u64 && end_position >= back_num as u64 {
-                *predecessor_monitoring_range_inclusive = None;
                 *latest_monitoring_range_inclusive = None;
             } else if start_position >= back_num as u64 {
-                *predecessor_monitoring_range_inclusive = Some((0, end_position as usize));
                 *latest_monitoring_range_inclusive = Some((0, end_position as usize));
             } else if end_position >= back_num as u64 {
-                *predecessor_monitoring_range_inclusive =
-                    Some((start_position as usize, back_num - 1));
                 *latest_monitoring_range_inclusive = Some((start_position as usize, back_num - 1));
             }
         } else {
             for idx in 0..alive_num {
-                if alive_vector[idx] == end_positions[*this] {
+                if alive_vector[idx] == end_positions[this] {
                     let start_idx = ((idx - 1) + alive_num) % alive_num;
                     let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
-                    let start_position = end_positions[start_idx];
-                    let end_position = end_positions[*this];
+                    let start_position = (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM;
+                    let end_position = end_positions[this];
                     if start_position >= back_num as u64 && end_position >= back_num as u64 {
                         *latest_monitoring_range_inclusive = None
                     } else if start_position >= back_num as u64 {
@@ -300,27 +324,66 @@ impl KeeperClient {
                             Some((start_position as usize, back_num - 1));
                     }
 
-                    let pre_start_position = end_positions[pre_start_idx];
+                    let pre_start_position = (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM;
                     let pre_end_position = start_position - 1;
                     if pre_start_position >= back_num as u64 && pre_end_position >= back_num as u64
                     {
-                        *latest_monitoring_range_inclusive = None
+                        *predecessor_monitoring_range_inclusive = None
                     } else if pre_start_position >= back_num as u64 {
-                        *latest_monitoring_range_inclusive = Some((0, pre_end_position as usize));
+                        *predecessor_monitoring_range_inclusive =
+                            Some((0, pre_end_position as usize));
                     } else if pre_end_position >= back_num as u64 {
-                        *latest_monitoring_range_inclusive =
+                        *predecessor_monitoring_range_inclusive =
                             Some((pre_start_position as usize, back_num - 1));
                     }
                 }
             }
         }
-        drop(keeper_addrs);
-        drop(end_positions);
-        drop(statuses);
-        drop(this);
         drop(latest_monitoring_range_inclusive);
         drop(predecessor_monitoring_range_inclusive);
-        drop(backs);
         Ok(())
     }
+
+    // monitor the statuses of other keepers and update the backend ranges
+    pub async fn monitor(&self) -> TribResult<bool> {
+        // get keeper addresses
+        let addrs_lock = self.keeper_addrs.read().await;
+        let addrs = addrs_lock.clone();
+        drop(addrs_lock);
+
+        // get current keeper index
+        let this_lock = self.this.read().await;
+        let this = this_lock.clone();
+        drop(this_lock);
+        loop {
+            for idx in 0..addrs.len() {
+                // only contact other keepers
+                if idx == this {
+                    continue;
+                }
+                // check acknowledgement
+                let acknowledgement = self.send_clock(idx, false, 0).await; // just a normal clock heartbeat
+                let mut statuses = self.statuses.write().await;
+                match acknowledgement {
+                    // alive
+                    Ok(acknowledgement) => {
+                        // When a keeper is initializing, we don't update its status.
+                        // When its successor acknowledge it, and it finishes initialization, we will update its status.
+                        if !acknowledgement.initializing {
+                            statuses[idx] = true; // maintain the keeper statuses
+                        }
+                    }
+                    // down
+                    Err(_) => {
+                        statuses[idx] = false; // maintain the keeper statuses
+                    }
+                }
+                drop(statuses);
+            }
+            let _update_result = self.update_ranges().await; // update the range
+            sleep(Duration::from_secs(1)).await; // sleep for 1 second
+        }
+        Ok(true)
+    }
 }
+// When the predecessor crashes, we have to handle the backend crash for it.
