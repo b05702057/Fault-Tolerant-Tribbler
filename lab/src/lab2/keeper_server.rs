@@ -831,6 +831,11 @@ impl KeeperServer {
             ready_sender.send(true)?;
         }
         drop(ready_sender_opt);
+        
+        // TESTING
+        let range = latest_monitoring_range_inclusive.lock().await;
+        println!("Our range is: {:?}", range);
+        drop(range);
 
         let live_backends_view_clone = live_backends_view.clone();
         let storage_clients_clone = storage_clients.clone();
@@ -1230,12 +1235,12 @@ impl KeeperServer {
         let latest_range = latest_monitoring_range_inclusive_lock.clone();
         drop(latest_monitoring_range_inclusive_lock);
         if let Some(range_to_scan) = latest_range {
-            Self::first_scan_for_initialization(
+            let _ = Self::first_scan_for_initialization(
                 live_backends_view_arc,
                 storage_clients,
                 range_to_scan,
             )
-            .await;
+            .await?;
         }
 
         tokio::time::sleep(Duration::from_secs(4)).await; // sleep after the first scan
