@@ -19,8 +19,8 @@ use tribbler::err::TribResult;
 
 const MAX_BACKEND_NUM: u64 = 300;
 pub struct KeeperClient {
-    pub backs: Arc<RwLock<Vec<String>>>,        // backend addresses
-    pub keeper_addrs: Arc<RwLock<Vec<String>>>, // keeper addresses
+    pub http_back_addrs: Vec<String>,        // backend addresses
+    pub keeper_addrs: Vec<String>, // keeper addresses
     pub statuses: Arc<RwLock<Vec<bool>>>,       // keeper statuses
     pub end_positions: Arc<RwLock<Vec<u64>>>,   // keeper end positions on the ring
     pub this: Arc<RwLock<usize>>,               // the index of this keeper
@@ -38,8 +38,8 @@ pub struct KeeperClient {
 
 impl KeeperClient {
     pub fn new(
-        backs: Arc<RwLock<Vec<String>>>,
-        keeper_addrs: Arc<RwLock<Vec<String>>>,
+        http_back_addrs: Vec<String>,
+        keeper_addrs: Vec<String>,
         statuses: Arc<RwLock<Vec<bool>>>,
         end_positions: Arc<RwLock<Vec<u64>>>,
         this: Arc<RwLock<usize>>,
@@ -55,7 +55,7 @@ impl KeeperClient {
         keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>,
     ) -> KeeperClient {
         KeeperClient {
-            backs,
+            http_back_addrs,
             keeper_addrs,
             statuses,
             end_positions,
@@ -79,7 +79,7 @@ impl KeeperClient {
         let mut keeper_client_opts = Arc::clone(&self.keeper_client_opts).lock_owned().await;
         // To prevent unnecessary reconnection, we only connect if we haven't.
         if let None = keeper_client_opts[idx] {
-            let addr = &self.keeper_addrs.read().await[idx];
+            let addr = &self.keeper_addrs[idx];
             keeper_client_opts[idx] = Some(KeeperRpcClient::connect(addr.clone()).await?);
             drop(addr);
         }
@@ -138,7 +138,7 @@ impl KeeperClient {
     }
 
     pub async fn initialization(&self) -> TribResult<bool> {
-        let addrs = self.keeper_addrs.read().await;
+        let addrs = self.keeper_addrs.clone();
         let this = self.this.read().await;
         let mut normal_join = false; // if this is a normal join operation
         let start_time = Instant::now();
@@ -188,7 +188,7 @@ impl KeeperClient {
 
             // find the successor
             let this = self.this.read().await;
-            let addrs = self.keeper_addrs.read().await;
+            let addrs = self.keeper_addrs.clone();
             let statuses = self.statuses.read().await;
             let mut successor_index = *this;
             for idx in *this + 1..addrs.len() {
@@ -251,7 +251,7 @@ impl KeeperClient {
     }
 
     pub async fn update_ranges(&self) -> TribResult<()> {
-        let keeper_addrs = self.keeper_addrs.read().await;
+        let keeper_addrs = self.keeper_addrs.clone();
         let end_positions = self.end_positions.read().await;
         let statuses = self.statuses.read().await;
         let this = self.this.read().await;
@@ -259,9 +259,9 @@ impl KeeperClient {
             self.predecessor_monitoring_range_inclusive.write().await;
         let mut latest_monitoring_range_inclusive =
             self.latest_monitoring_range_inclusive.write().await;
-        let backs = self.backs.read().await;
+        let http_back_addrs = self.http_back_addrs.clone();
         let mut alive_vector = Vec::<u64>::new();
-        let back_num = backs.len();
+        let back_num = http_back_addrs.len();
         // get end positions of alive keepers
         for idx in 0..keeper_addrs.len() {
             if statuses[idx] {
@@ -311,13 +311,12 @@ impl KeeperClient {
                 }
             }
         }
-        drop(keeper_addrs);
+
         drop(end_positions);
         drop(statuses);
         drop(this);
         drop(latest_monitoring_range_inclusive);
         drop(predecessor_monitoring_range_inclusive);
-        drop(backs);
         Ok(())
     }
 }
