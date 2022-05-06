@@ -203,7 +203,8 @@ async fn migration_crash(
     // Move all the data in bin which is hashed into the range (id of node before predecessor, id of predecessor] to crashed node's successor
     for bin in pred_bins.iter() {
         let idx = hash_bin_name_to_backend_idx(bin, &live_https, storage_clients.len()).await?;
-        if check_in_bound_wrap_around_inclusive((prev_pred + 1) % storage_clients.len(), pred, idx) {
+        if check_in_bound_wrap_around_inclusive((prev_pred + 1) % storage_clients.len(), pred, idx)
+        {
             match bin_migration(
                 bin,
                 storage_clients[pred].clone(),
@@ -324,6 +325,7 @@ async fn bin_migration(
             continue;
         }
 
+        // Append both entries from prefix list and suffix list to the prefix list in the backend we're copying to
         let prefix_key = format!("{}{}", PREFIX, key);
 
         let prefix_key_list = match from.list_get(&prefix_key).await {
@@ -333,7 +335,7 @@ async fn bin_migration(
         for item in prefix_key_list.iter() {
             match to
                 .list_append(&KeyValue {
-                    key: prefix_key.clone(),
+                    key: format!("{}{}", PREFIX, key),
                     value: item.clone(),
                 })
                 .await
@@ -351,7 +353,7 @@ async fn bin_migration(
         for item in suffix_key_list.iter() {
             match to
                 .list_append(&KeyValue {
-                    key: suffix_key.clone(),
+                    key: format!("{}{}", PREFIX, key),
                     value: item.clone(),
                 })
                 .await
