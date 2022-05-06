@@ -474,8 +474,8 @@ impl KeeperServer {
                     // This logic can be blocking since, no need to scan if this is in progress, since no new backend
                     // events will happen during that period
                     if should_handle_event {
-                        // Start scan first of all range
-                        // TODO wait 5 seconds and then migration etc.
+                        // Start scan first of all range (spawn)
+                        // TODO wait 5 seconds and then do migration etc.
                     }
                 }
             }
@@ -577,7 +577,7 @@ impl KeeperServer {
     pub async fn serve(&mut self) -> TribResult<()> {
 
         // TODO ONLY SEND ONCE READY!!
-        
+
         let ready_sender_opt = self.ready_sender_opt.lock().await;
         // Send ready
         if let Some(ready_sender) = &*ready_sender_opt {

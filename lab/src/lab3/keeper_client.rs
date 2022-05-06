@@ -175,12 +175,11 @@ impl KeeperClient {
         drop(addrs);
         // update the range
         let _update_result = self.update_ranges().await;
+        tokio::time::sleep(Duration::from_secs(4)); // sleep after the first scan
 
+        // scan the backends and sleep for a specific amount of time
+        // todo!(); TODO
         if normal_join {
-            // scan the backends and sleep for a specific amount of time
-            // todo!(); TODO
-            tokio::time::sleep(Duration::from_secs(4)); // sleep after the first scan
-
             // find the successor
             let this = self.this;
             let addrs = self.keeper_addrs.clone();
@@ -233,11 +232,8 @@ impl KeeperClient {
                     Err(_) => (),
                 }
             }
-        } else {
-            // starting phase
-            // scan to maintain the backends
-            todo!();
         }
+        
         let mut initializing = self.initializing.write().await;
         *initializing = false;
         drop(initializing);
