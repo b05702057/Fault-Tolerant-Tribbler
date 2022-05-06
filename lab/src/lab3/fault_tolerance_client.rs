@@ -33,7 +33,7 @@ impl StorageFaultToleranceClient {
             }
         }
         Err(Box::new(TribblerError::Unknown(
-            "Get key indexin list error. Some contention happened".to_string(),
+            "Get key index in list error. Some contention happened".to_string(),
         )))
     }
 
@@ -624,7 +624,9 @@ impl KeyList for StorageFaultToleranceClient {
         };
 
         result = primary.list_append(&translated_kv).await;
-        let primary_appended_list = self.get_dedup_concat_list_string(primary, &kv.key).await?;
+        let primary_appended_list = self
+            .get_dedup_concat_list_string(primary, &translated_key)
+            .await?;
 
         // Get index in the concat list
         let index = self
