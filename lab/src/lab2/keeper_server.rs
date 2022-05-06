@@ -231,6 +231,10 @@ impl KeeperServer {
         event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
         event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
         event_handling_mutex: Arc<Mutex<u64>>,
+        statuses: Arc<RwLock<Vec<bool>>>,
+        keeper_addrs: Vec<String>,
+        keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>,
+        this: usize, // this keeper index
     ) -> TribResult<()> {
         // To synchronize backends. Initialize to 0
         loop {
@@ -512,12 +516,42 @@ impl KeeperServer {
                         let (all_live_back_indices, _) = scan_all_join_handle.await??;
                         let storage_clients_clones = clients_for_scanning.clone();
 
+                        let mut successor_keeper_client: Option<
+                            KeeperRpcClient<tonic::transport::Channel>,
+                        > = None;
+
+                        // Keeper statuses
+                        let statuses_lock = statuses.write().await;
+                        let statuses_clone = (*statuses_lock).clone();
+                        drop(statuses_lock);
+
+                        let found_index =
+                            Self::find_successor_index(statuses_clone, this, keeper_addrs.len());
+                        if found_index != this {
+                            let successor_index = found_index;
+
+                            Self::connect(
+                                Arc::clone(&keeper_client_opts),
+                                keeper_addrs.clone(),
+                                successor_index,
+                            )
+                            .await?;
+                            let keeper_client_opts =
+                                Arc::clone(&keeper_client_opts).lock_owned().await;
+                            successor_keeper_client = match &keeper_client_opts[successor_index] {
+                                Some(keeper_client) => Some(keeper_client.clone()),
+                                None => None,
+                            };
+                        }
+
                         // TODO call migration event passing in all_live_back_indices, event, and storage_clients_clones
                         match migration_event(
                             &event,
                             all_live_back_indices,
                             storage_clients_clones,
                             None,
+                            // global_max_clock,
+                            // successor_keeper_client,
                         )
                         .await
                         {
@@ -868,6 +902,10 @@ impl KeeperServer {
         let event_acked_by_successor_clone = event_acked_by_successor.clone();
         let event_detected_by_this_clone = event_detected_by_this.clone();
         let event_handling_mutex_clone = event_handling_mutex.clone();
+        let statuses_clone = statuses.clone();
+        let keeper_addrs_clone = keeper_addrs.clone();
+        let keeper_client_opts_clone = keeper_client_opts.clone();
+
         let handle1 = tokio::spawn(async move {
             let res = Self::periodic_scan_and_sync_backend(
                 live_backends_view_clone,
@@ -879,6 +917,10 @@ impl KeeperServer {
                 event_acked_by_successor_clone,
                 event_detected_by_this_clone,
                 event_handling_mutex_clone,
+                statuses_clone,
+                keeper_addrs_clone,
+                keeper_client_opts_clone,
+                this,
             )
             .await;
             if let Err(e) = res {
@@ -1137,16 +1179,16 @@ impl KeeperServer {
         let mut predecessor_monitoring_range_inclusive =
             predecessor_monitoring_range_inclusive.write().await;
         let mut latest_monitoring_range_inclusive = latest_monitoring_range_inclusive.write().await;
-        let alive_num = alive_vector.len();
+        let alive_num = alive_vector.len() as i32;
         if alive_num == 1 {
             *predecessor_monitoring_range_inclusive = None;
             *latest_monitoring_range_inclusive = Some((0, back_num - 1 as usize));
         } else {
             for idx in 0..alive_num {
-                if alive_vector[idx] == end_positions[this] {
-                    let start_idx = ((idx - 1) + alive_num) % alive_num;
-                    let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
-                    let start_position = (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM;
+                if alive_vector[idx as usize] == end_positions[this] {
+                    let start_idx = ((idx as i32 - 1) + alive_num) % alive_num;
+                    let pre_start_idx = ((idx as i32 - 2) + alive_num) % alive_num;
+                    let start_position = (alive_vector[start_idx as usize] + 1) % MAX_BACKEND_NUM;
                     let end_position = end_positions[this];
                     if start_position >= back_num as u64
                         && end_position >= back_num as u64
@@ -1160,8 +1202,9 @@ impl KeeperServer {
                             Some((start_position as usize, back_num - 1));
                     }
 
-                    let pre_start_position = (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM;
-                    let pre_end_position = start_position - 1;
+                    let pre_start_position =
+                        (alive_vector[pre_start_idx as usize] + 1) % MAX_BACKEND_NUM;
+                    let pre_end_position = (start_position + MAX_BACKEND_NUM - 1) % MAX_BACKEND_NUM;
                     if pre_start_position >= back_num as u64
                         && pre_end_position >= back_num as u64
                         && start_position <= end_position
@@ -1413,7 +1456,9 @@ impl KeeperServer {
                                 if predecessor_index == idx {
                                     // call the take over function
 
-                                    let mut successor_keeper_client: Option<KeeperRpcClient<tonic::transport::Channel>> = None;
+                                    let mut successor_keeper_client: Option<
+                                        KeeperRpcClient<tonic::transport::Channel>,
+                                    > = None;
 
                                     let found_index = Self::find_successor_index(
                                         statuses.clone(),
@@ -1423,14 +1468,20 @@ impl KeeperServer {
                                     if found_index != this {
                                         let successor_index = found_index;
 
-                                        Self::connect(Arc::clone(&keeper_client_opts), keeper_addrs.clone(), idx).await?;
-                                        let keeper_client_opts = Arc::clone(&keeper_client_opts).lock_owned().await;
-                                        successor_keeper_client = match &keeper_client_opts[idx] {
-                                            Some(keeper_client) => Some(keeper_client.clone()),
-                                            None => None
-                                        };
+                                        Self::connect(
+                                            Arc::clone(&keeper_client_opts),
+                                            keeper_addrs.clone(),
+                                            successor_index,
+                                        )
+                                        .await?;
+                                        let keeper_client_opts =
+                                            Arc::clone(&keeper_client_opts).lock_owned().await;
+                                        successor_keeper_client =
+                                            match &keeper_client_opts[successor_index] {
+                                                Some(keeper_client) => Some(keeper_client.clone()),
+                                                None => None,
+                                            };
                                     }
-
 
                                     Self::take_over_pred_event_handling_if_needed(
                                         predecessor_event_detected.clone(),
@@ -1511,8 +1562,6 @@ impl KeeperServer {
 
         drop(logs_done_lock);
 
-        let storage_client_clones = clients_for_scanning.clone();
-
         let keeper_clock_lock = keeper_clock.read().await;
         let last_keeper_clock = *keeper_clock_lock;
         drop(keeper_clock_lock);
@@ -1523,6 +1572,8 @@ impl KeeperServer {
             all_live_back_indices,
             clients_for_scanning.clone(),
             Some(done_keys),
+            // last_keeper_clock,
+            // successor_keeper_client,
         )
         .await
         {
