@@ -272,7 +272,7 @@ impl KeeperServer {
                 )
                 .await?;
                 println!(
-                    "[DEBUGGING] bin_client's periodic_scan: live_addrs.len(): {}",
+                    "[DEBUGGING] keeper_server's periodic_scan: live_addrs.len(): {}",
                     cur_live_back_indices.len()
                 );
 
@@ -889,8 +889,8 @@ impl KeeperServer {
         drop(ready_sender_opt);
 
         // TESTING
-        let range = latest_monitoring_range_inclusive.write().await;
-        println!("Our range is: {:?}", range);
+        let range = latest_monitoring_range_inclusive.read().await;
+        println!("Keeper {}'s range is: {:?}", this, range);
         drop(range);
 
         let live_backends_view_clone = live_backends_view.clone();
@@ -1163,9 +1163,16 @@ impl KeeperServer {
         let end_positions = end_positions_lock.clone();
         drop(end_positions_lock);
 
+        println!(
+            "[DEBUGGING] update_ranges: end_positions are {:?}",
+            end_positions
+        );
+
         let statuses_lock = statuses.read().await;
         let statuses = statuses_lock.clone();
         drop(statuses_lock);
+
+        println!("[DEBUGGING] update_ranges: stasuses are {:?}", statuses);
 
         // get end positions of alive keepers
         let mut alive_vector = Vec::<u64>::new();
@@ -1200,6 +1207,9 @@ impl KeeperServer {
                     } else if end_position >= back_num as u64 {
                         *latest_monitoring_range_inclusive =
                             Some((start_position as usize, back_num - 1));
+                    } else {
+                        *latest_monitoring_range_inclusive =
+                            Some((start_position as usize, end_position as usize));
                     }
 
                     let pre_start_position =
@@ -1216,10 +1226,14 @@ impl KeeperServer {
                     } else if pre_end_position >= back_num as u64 {
                         *predecessor_monitoring_range_inclusive =
                             Some((pre_start_position as usize, back_num - 1));
+                    } else {
+                        *predecessor_monitoring_range_inclusive =
+                            Some((pre_start_position as usize, pre_end_position as usize));
                     }
                 }
             }
         }
+        // Important to drop in reverse order as acquire?
         drop(latest_monitoring_range_inclusive);
         drop(predecessor_monitoring_range_inclusive);
         Ok(())
