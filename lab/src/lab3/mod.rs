@@ -170,3 +170,4 @@
 pub mod fault_tolerance_client;
 mod storage_structs;
 pub use crate::lab3::fault_tolerance_client::StorageFaultToleranceClient;
+pub mod keeper_client;

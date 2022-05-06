@@ -1,11 +1,23 @@
+use crate::keeper::keeper_rpc_client::KeeperRpcClient;
 use crate::lab1::client::StorageClient;
+use crate::lab3::keeper_client::KeeperClient;
 use std::collections::HashSet;
 use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::Receiver, Mutex, RwLock};
 use tribbler::{config::KeeperConfig, err::TribResult, storage::Storage};
 
+use crate::{
+    keeper,
+    keeper::{Acknowledgement, Bool, Clock, Key},
+};
+
+use async_trait::async_trait;
+use std::cmp;
+use tonic::Response;
+
 const KEEPER_SCAN_AND_SYNC_BACKEND_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_BACKEND_NUM: u64 = 300;
 
 #[derive(Clone)]
 pub struct LiveBackendsView {
@@ -21,6 +33,7 @@ pub struct LiveBackendsView {
 pub enum BackendEventType {
     Join,
     Leave,
+    None, // Only for RPC to save type.
 }
 
 #[derive(Clone)]
@@ -47,11 +60,11 @@ pub struct KeeperServer {
     /// Send a value when the keeper is ready. The distributed key-value
     /// service should be ready to serve when *any* of the keepers is
     /// ready.
-    pub ready_sender_opt: Option<Sender<bool>>,
+    pub ready_sender_opt: Arc<Mutex<Option<Sender<bool>>>>,
     /// When a message is received on this channel, it should trigger a
     /// graceful shutdown of the server. If no channel is present, then
     /// no graceful shutdown mechanism needs to be implemented.
-    pub shutdown_receiver_opt: Option<Receiver<()>>,
+    pub shutdown_receiver_opt: Arc<Mutex<Option<Receiver<()>>>>,
     /// Whether to shutdown keeper or not. Note tokio::sync:RwLock needed
     /// since bin_run requires the KeeperServer returned by serve_keeper
     /// to by Sync (for tokio spawn)
@@ -84,6 +97,14 @@ pub struct KeeperServer {
     /// To lock before code that uses data for event handling negotiation between
     /// predecessor and successor
     pub event_handling_mutex: Arc<Mutex<u64>>,
+
+    pub statuses: Arc<RwLock<Vec<bool>>>,
+    pub end_positions: Arc<RwLock<Vec<u64>>>, // keeper end positions on the ring
+    pub keeper_clock: Arc<RwLock<u64>>,       // keeper_clock of this keeper
+    pub key_list: Arc<RwLock<HashSet<String>>>, // store the keys of finsihed lists to help migration
+    pub initializing: Arc<RwLock<bool>>,        // if this keeper is initializing
+    pub keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>, // keeper connections
+    pub keeper_client: Arc<RwLock<Option<KeeperClient>>>,
 }
 
 impl KeeperServer {
@@ -99,14 +120,34 @@ impl KeeperServer {
             storage_clients.push(Arc::new(StorageClient::new(http_back_addr)));
         }
 
-        Ok(KeeperServer {
+        let keeper_addrs = kc
+            .addrs
+            .into_iter()
+            .map(|keeper_addr| format!("http://{}", keeper_addr))
+            .collect::<Vec<String>>();
+
+        let this = kc.this;
+        let mut statuses = Vec::<bool>::new();
+        let mut end_positions = Vec::<u64>::new();
+        let manage_num = MAX_BACKEND_NUM / (keeper_addrs.len() as u64); // use 300 directly to avoid edge cases of using http_back_addrs.len()
+        let mut keeper_client_opts =
+            Vec::<Option<KeeperRpcClient<tonic::transport::Channel>>>::new();
+        for idx in 0..keeper_addrs.len() {
+            statuses.push(false);
+            let end_position = (idx as u64 + 1) * manage_num - 1;
+            end_positions.push(end_position);
+            keeper_client_opts.push(None);
+        }
+        statuses[this] = true;
+
+        let mut keeper_server = KeeperServer {
             http_back_addrs: http_back_addrs,
             storage_clients: storage_clients,
-            keeper_addrs: kc.addrs,
+            keeper_addrs: keeper_addrs,
             this: kc.this,
             id: kc.id,
-            ready_sender_opt: kc.ready,
-            shutdown_receiver_opt: kc.shutdown,
+            ready_sender_opt: Arc::new(Mutex::new(kc.ready)),
+            shutdown_receiver_opt: Arc::new(Mutex::new(kc.shutdown)),
             should_shutdown: Arc::new(RwLock::new(false)),
             saved_tasks_spawned_handles: Arc::new(Mutex::new(vec![])),
             live_backends_view: Arc::new(RwLock::new(LiveBackendsView {
@@ -119,7 +160,36 @@ impl KeeperServer {
             event_acked_by_successor: Arc::new(RwLock::new(None)),
             event_detected_by_this: Arc::new(RwLock::new(None)),
             event_handling_mutex: Arc::new(Mutex::new(0)),
-        })
+            statuses: Arc::new(RwLock::new(statuses)),
+            end_positions: Arc::new(RwLock::new(end_positions)),
+            keeper_clock: Arc::new(RwLock::new(0)),
+            key_list: Arc::new(RwLock::new(HashSet::<String>::new())),
+            initializing: Arc::new(RwLock::new(true)),
+            keeper_client_opts: Arc::new(Mutex::new(keeper_client_opts)),
+            keeper_client: Arc::new(RwLock::new(None)),
+        };
+
+        keeper_server.keeper_client = Arc::new(RwLock::new(Some(KeeperClient {
+            http_back_addrs: keeper_server.http_back_addrs.clone(),
+            keeper_addrs: keeper_server.keeper_addrs.clone(),
+            statuses: Arc::clone(&keeper_server.statuses),
+            end_positions: Arc::clone(&keeper_server.end_positions),
+            this: keeper_server.this,
+            keeper_clock: Arc::clone(&keeper_server.keeper_clock),
+            key_list: Arc::clone(&keeper_server.key_list),
+            event_acked_by_successor: Arc::clone(&keeper_server.event_acked_by_successor),
+            latest_monitoring_range_inclusive: Arc::clone(
+                &keeper_server.latest_monitoring_range_inclusive,
+            ),
+            predecessor_monitoring_range_inclusive: Arc::clone(
+                &keeper_server.predecessor_monitoring_range_inclusive,
+            ),
+            event_handling_mutex: Arc::clone(&keeper_server.event_handling_mutex),
+            initializing: Arc::clone(&keeper_server.initializing),
+            keeper_client_opts: Arc::clone(&keeper_server.keeper_client_opts),
+        })));
+
+        Ok(keeper_server)
     }
 
     fn is_same_backend_event(
@@ -404,6 +474,7 @@ impl KeeperServer {
                     // This logic can be blocking since, no need to scan if this is in progress, since no new backend
                     // events will happen during that period
                     if should_handle_event {
+                        // Start scan first of all range
                         // TODO wait 5 seconds and then migration etc.
                     }
                 }
@@ -504,13 +575,13 @@ impl KeeperServer {
     }
 
     pub async fn serve(&mut self) -> TribResult<()> {
-        // Listen for shut down asynchronously
-        let should_shutdown_clone = Arc::clone(&self.should_shutdown);
 
+        let ready_sender_opt = self.ready_sender_opt.lock().await;
         // Send ready
-        if let Some(ready_sender) = &self.ready_sender_opt {
+        if let Some(ready_sender) = &*ready_sender_opt {
             ready_sender.send(true)?;
         }
+        drop(ready_sender_opt);
 
         // Sync backends every 1 second
         const KEEPER_BACKEND_SYNC_INTERVAL: Duration = Duration::from_millis(1000);
@@ -530,7 +601,8 @@ impl KeeperServer {
         // (*saved_tasks_spawned_handles_lock).push(periodic_scan_and_sync_handle);
 
         // Block on the shutdown signal if exists
-        if let Some(mut shutdown_receiver) = self.shutdown_receiver_opt.take() {
+        let mut shutdown_receiver_opt = self.shutdown_receiver_opt.lock().await;
+        if let Some(mut shutdown_receiver) = (*shutdown_receiver_opt).take() {
             shutdown_receiver.recv().await;
             // Gracefully close
             shutdown_receiver.close();
@@ -543,7 +615,101 @@ impl KeeperServer {
             let future = core::future::pending();
             let res: i32 = future.await;
         }
+        drop(shutdown_receiver_opt);
 
         Ok(())
     }
 }
+
+#[async_trait]
+impl keeper::keeper_rpc_server::KeeperRpc for KeeperServer {
+    async fn send_clock(
+        &self,
+        request: tonic::Request<Clock>,
+    ) -> Result<tonic::Response<Acknowledgement>, tonic::Status> {
+        let received_request = request.into_inner();
+
+        // store the timestamp from another keeper and use it to sync later
+        let keeper_clock = self.keeper_clock.read().await;
+        if received_request.timestamp > *keeper_clock {
+            drop(keeper_clock);
+            let mut keeper_clock = self.keeper_clock.write().await;
+            *keeper_clock = cmp::max(*keeper_clock, received_request.timestamp);
+        }
+
+        // 1) just a normal clock heartbeat
+        // 2) just checking if this keeper is initialziing (step 1 of initialization)
+        if !received_request.initializing || received_request.step == 1 {
+            let initializing = self.initializing.read().await;
+            let return_initializing = initializing.clone();
+            drop(initializing);
+            return Ok(Response::new(Acknowledgement {
+                event_type: "None".to_string(),
+                back_idx: 0,
+                initializing: return_initializing,
+            }));
+        }
+
+        // step 2: join after knowing other keepers are not initializing
+        let guard = self.event_handling_mutex.lock();
+        let current_time = Instant::now();
+        let event_detected_by_this = self.event_detected_by_this.read().await;
+        let event_detected = event_detected_by_this.as_ref().unwrap().clone();
+        drop(event_detected_by_this);
+        let mut return_event = "None".to_string();
+        let mut back_idx = 0;
+        let detecting_time = event_detected.timestamp;
+        if current_time.duration_since(detecting_time) < Duration::new(10, 0) {
+            let mut ack_to_predecessor_time = self.ack_to_predecessor_time.write().await;
+            *ack_to_predecessor_time = Some(Instant::now());
+            match event_detected.event_type {
+                BackendEventType::None => {
+                    return_event = "None".to_string();
+                }
+                BackendEventType::Join => {
+                    return_event = "Join".to_string();
+                    back_idx = event_detected.back_idx;
+                }
+                BackendEventType::Leave => {
+                    return_event = "Leave".to_string();
+                    back_idx = event_detected.back_idx;
+                }
+            }
+        }
+        let initializing = self.initializing.read().await;
+        let return_initializing = initializing.clone();
+        drop(initializing);
+
+        // change the state of the predecessor
+        let mut statuses = self.statuses.write().await;
+        statuses[received_request.idx as usize] = true;
+        drop(statuses);
+        // update the range
+        let keeper_client = self.keeper_client.write().await;
+        let _update_result = keeper_client.as_ref().unwrap().update_ranges().await;
+
+        drop(guard);
+        return Ok(Response::new(Acknowledgement {
+            event_type: return_event,
+            back_idx: back_idx as u64,
+            initializing: return_initializing,
+        }));
+    }
+
+    async fn send_key(
+        &self,
+        request: tonic::Request<Key>,
+    ) -> Result<tonic::Response<Bool>, tonic::Status> {
+        // record the log entry to avoid repetitive migration
+        let received_key = request.into_inner();
+        let mut key_list = self.key_list.write().await;
+        key_list.insert(received_key.key);
+
+        // The log entry is received and pushed.
+        return Ok(Response::new(Bool { value: true }));
+    }
+}
+
+// When a keeper joins, it needs to know if it's at the starting phase.
+// 1) If it finds a working keeper => normal join
+// 2) else => starting phase

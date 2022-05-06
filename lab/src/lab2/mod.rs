@@ -606,6 +606,6 @@ pub use crate::lab2::lab::new_bin_client;
 pub use crate::lab2::lab::new_front;
 pub use crate::lab2::lab::serve_keeper;
 mod bin_client;
-mod keeper_server;
+pub mod keeper_server;
 mod storage_structs;
 mod trib_front;
