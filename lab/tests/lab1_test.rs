@@ -4,7 +4,7 @@ use std::{
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use lab::{self, lab1};
@@ -20,7 +20,7 @@ use tribbler::{
     storage::{KeyList, KeyString, KeyValue, MemStorage, Pattern, Storage},
 };
 
-const DEFAULT_HOST: &str = "127.0.0.1:3000";
+const DEFAULT_HOST: &str = "localhost:3000";
 
 async fn setup(
     addr: Option<&str>,
@@ -28,7 +28,7 @@ async fn setup(
 ) -> TribResult<(Box<dyn Storage>, JoinHandle<TribResult<()>>, MpscSender<()>)> {
     let _ = env_logger::builder()
         .default_format()
-        .filter_level(LevelFilter::Error)
+        .filter_level(LevelFilter::Info)
         .try_init();
     let addr = match addr {
         Some(x) => x,
@@ -226,7 +226,7 @@ async fn test_multi_serve() -> TribResult<()> {
         shutdown: None,
     };
     let cfg2 = BackConfig {
-        addr: "127.0.0.1:3001".to_string(),
+        addr: "localhost:3001".to_string(),
         storage: Box::new(MemStorage::default()),
         ready: Some(tx.clone()),
         shutdown: None,
@@ -283,7 +283,7 @@ async fn test_spawn_same_addr() -> TribResult<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_back_spawn_new_storage() -> TribResult<()> {
-    let host = format!("127.0.0.1:{}", rand_port());
+    let host = format!("localhost:{}", rand_port());
     let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
     let (shut_tx, shut_rx) = tokio::sync::mpsc::channel(1);
     let cfg = BackConfig {
@@ -316,7 +316,7 @@ async fn test_back_spawn_new_storage() -> TribResult<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_concurrent_cli_ops() -> TribResult<()> {
     let (client, _srv, _shut) = setup(None, None).await?;
-    let client = Arc::new(client);
+    let client = Arc::new(client);  // NOT SURE WHY NECESSARY? CAN COMMENT OUT AND STILL WORKS.
     let mut handles = vec![];
     for _ in 0..5 {
         let addr = format!("http://{}", DEFAULT_HOST);
@@ -356,5 +356,241 @@ async fn test_shutdown() -> TribResult<()> {
         ),
         Err(_) => (),
     };
+    Ok(())
+}
+
+//-------- From here onwards are my own tests ---------//
+
+// Test that additional latency induced by RPCs does not exceed 100ms
+// Currently being conservative and requiring total latency induced by RPC
+// does not exceed 100ms (instead of additional)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_rpc_additional_latency() -> TribResult<()> {
+    // Note the assertions are conservative since restricting total latency
+    // instead of additional latency. 
+    // If additional latency needs to be measured, then also need to measure 
+    // time for direct calls within server to storage and subtract from total.
+    const MAX_ADDITIONAL_LATENCY: Duration = Duration::from_millis(100);
+
+    let (client, _handle, _tx) = setup(None, None).await?;
+
+    let now = Instant::now();
+    let get_res = client.get("").await?;
+    assert_eq!(None, get_res);
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    
+    let now = Instant::now();
+    client.set(&kv("h8liu", "run")).await?;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    assert_eq!(Some("run".to_string()), client.get("h8liu").await?);
+
+    let now = Instant::now();
+    client.set(&kv("h8liu", "Run")).await?;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    assert_eq!(Some("Run".to_string()), client.get("h8liu").await?);
+
+
+    // Measure list_ ops
+
+    let now = Instant::now();
+    client.list_append(&kv("lst", "a")).await?;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    
+    let now = Instant::now();
+    let l = client.list_get("lst").await?.0;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    assert_eq!(1, l.len());
+    assert_eq!("a", l[0]);
+
+    let now = Instant::now();
+    client.list_append(&kv("lst", "a")).await?;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+
+    let now = Instant::now();
+    let l = client.list_get("lst").await?.0;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    assert_eq!(2, l.len());
+    assert_eq!("a", l[0]);
+    assert_eq!("a", l[1]);
+    assert_eq!(2, client.list_remove(&kv("lst", "a")).await?);
+    assert_eq!(0, client.list_get("lst").await?.0.len());
+
+
+    let now = Instant::now();
+    client.list_append(&kv("lst", "h8liu")).await?;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+
+    let now = Instant::now();
+    client.list_append(&kv("lst", "h7liu")).await?;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+
+    let now = Instant::now();
+    let l = client.list_get("lst").await?.0;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    assert_eq!(2, l.len());
+    assert_eq!("h8liu", l[0]);
+    assert_eq!("h7liu", l[1]);
+
+    let now = Instant::now();
+    let l = client.list_keys(&pat("ls", "st")).await?.0;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    assert_eq!(1, l.len());
+
+    let now = Instant::now();
+    let l = client.list_keys(&pat("z", "")).await?.0;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    assert_eq!(0, l.len());
+
+    let now = Instant::now();
+    let l = client.list_keys(&pat("", "")).await?.0;
+    let elapsed_time = now.elapsed();
+    assert!(elapsed_time < MAX_ADDITIONAL_LATENCY, "Elapsed time is {}ms, which is >= {}ms limit", elapsed_time.as_millis(), MAX_ADDITIONAL_LATENCY.as_millis());
+    assert_eq!(1, l.len());
+    Ok(())
+}
+
+// Test that client gets error when server crash, but no error
+// when server is restored
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_server_crash() -> TribResult<()> {
+    // Workflow: Setup server. Connect Client. Crash Server. Attempt RPC.
+
+    let addr = DEFAULT_HOST.to_string();
+    let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
+    let (shut_tx, shut_rx) = tokio::sync::mpsc::channel(1);
+    let cfg = BackConfig {
+        addr: addr.clone(),
+        storage: Box::new(MemStorage::default()),
+        ready: Some(tx.clone()),
+        shutdown: Some(shut_rx),
+    };
+    let handle = spawn_back(cfg);
+    assert_eq!(true, rx.recv_timeout(Duration::from_secs(2))?);
+
+    let client = lab1::new_client(format!("http://{}", addr.clone()).as_str()).await?;
+    client.set(&kv("hello", "hi")).await?;
+    assert_eq!(Some("hi".to_string()), client.get("hello").await?);
+
+    // Signal shutdown to simulate crash
+    let _ = shut_tx.send(()).await;
+    let _ = handle.await;
+
+    // Try RPCs and expect error
+    assert!(client.set(&kv("hello", "hey")).await.is_err());
+
+    // Start server with same config (simulate server being restored)
+    let cfg = BackConfig {
+        addr: DEFAULT_HOST.to_string(),
+        storage: Box::new(MemStorage::default()),
+        ready: Some(tx),
+        shutdown: None,
+    };
+    let _ = spawn_back(cfg);
+    assert_eq!(true, rx.recv_timeout(Duration::from_secs(2))?);
+
+    // Now client should be fine continuing communication with same address
+    client.set(&kv("hello", "bye")).await?;
+    assert_eq!(Some("bye".to_string()), client.get("hello").await?);
+    Ok(())
+}
+
+// Test that new_client call does not return error when attempting connect before 
+// server is ready, as well as storage client takes care of connecting upon the 
+// first RPC call if needed
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_new_client_connect_before_server_start() -> TribResult<()> {
+    let addr = DEFAULT_HOST.to_string();
+
+    // This call should not return error (from "await?"), even though connect
+    // should fail
+    let client = lab1::new_client(format!("http://{}", addr.clone()).as_str()).await?;
+
+    // Now set up server
+    let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
+    let cfg = BackConfig {
+        addr: addr.clone(),
+        storage: Box::new(MemStorage::default()),
+        ready: Some(tx.clone()),
+        shutdown: None
+    };
+    let _handle = spawn_back(cfg);
+    assert_eq!(true, rx.recv_timeout(Duration::from_secs(2))?);
+
+    // Now server is ready, these operations should connect and run normally (the first
+    // RPC call should trigger connection if not connected already)
+    client.set(&kv("h8liu", "run")).await?;
+    assert_eq!(Some("run".to_string()), client.get("h8liu").await?);
+    client.set(&kv("h8liu", "Run")).await?;
+    assert_eq!(Some("Run".to_string()), client.get("h8liu").await?);
+
+    Ok(())
+}
+
+// Test that server shuts down when all shutdown channel senders are dropped
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_server_shuts_down_when_all_senders_dropped() -> TribResult<()> {
+    let addr = DEFAULT_HOST.to_string();
+
+    // Now set up server
+    let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
+    let (shut_tx, shut_rx) = tokio::sync::mpsc::channel(1); 
+    let cfg = BackConfig {
+        addr: addr.clone(),
+        storage: Box::new(MemStorage::default()),
+        ready: Some(tx.clone()),
+        shutdown: Some(shut_rx),
+    };
+    let handle = spawn_back(cfg);
+    assert_eq!(true, rx.recv_timeout(Duration::from_secs(2))?);
+
+    // First make sure server is working
+    let client = lab1::new_client(format!("http://{}", addr.clone()).as_str()).await?;
+
+    client.set(&kv("h8liu", "run")).await?;
+    assert_eq!(Some("run".to_string()), client.get("h8liu").await?);
+    client.set(&kv("h8liu", "Run")).await?;
+    assert_eq!(Some("Run".to_string()), client.get("h8liu").await?);
+
+    // Drop the only sender. This triggers the Receiver (shut_rx) to return None upon calling recv().
+    drop(shut_tx);
+
+    // Now server should be shut down so there should be error
+    // Await this shut down, should not time out.
+    let _ = handle.await;
+    assert!(client.set(&kv("hello", "hey")).await.is_err());  // Server is shut down so client will get error
+
+    Ok(())
+}
+   
+// Test server sends false on ready channel when failing server setups
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_server_setup_fails_sends_ready_false() -> TribResult<()> {
+    // Give a bad IP address and expect ready signal to be received as None
+    let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
+    let cfg = BackConfig {
+        addr: "^_^".to_string(),
+        storage: Box::new(MemStorage::default()),
+        ready: Some(tx),
+        shutdown: None,
+    };
+    let handle = spawn_back(cfg);
+    // Expect server to send false on ready channel
+    let server_message = rx.recv_timeout(Duration::from_secs(1))?; 
+    assert_eq!(false, server_message);
+
+    let r = handle.await;
+    assert!(r?.is_err());
     Ok(())
 }
