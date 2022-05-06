@@ -546,6 +546,7 @@ impl KeeperServer {
 
                         println!("\n[DEBUGGING] ----------Regular migration started!-----------\n");
                         println!("event is: {:?}", &event);
+                        println!("live_https is: {:?}", &all_live_back_indices);
 
                         // TODO call migration event passing in all_live_back_indices, event, and storage_clients_clones
                         match migration_event(
