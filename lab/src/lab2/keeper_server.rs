@@ -1446,7 +1446,7 @@ impl KeeperServer {
         drop(pred_event_lock);
 
         // If no pred event or not a recent event, return
-        match pred_event {
+        let back_ev = match pred_event {
             None => return Ok(()),
             Some(back_ev) => {
                 if Instant::now().saturating_duration_since(back_ev.timestamp)
@@ -1454,8 +1454,9 @@ impl KeeperServer {
                 {
                     return Ok(());
                 }
+                back_ev
             }
-        }
+        };
 
         // Clone clients since later moving into async for tokio spawn async execution.
         let clients_for_scanning_clones = clients_for_scanning.clone();
@@ -1482,6 +1483,8 @@ impl KeeperServer {
         *logs_done_lock = vec![];
 
         drop(logs_done_lock);
+
+        let storage_client_clones = clients_for_scanning.clone();
         // TODO Call migration
 
         Ok(())
