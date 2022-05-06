@@ -1,11 +1,14 @@
 use super::keeper_server::{
     BackendEvent, BackendEventType, DoneEntry, LIST_KEY_TYPE_STR, REGULARY_KEY_TYPE_STR,
 };
+use crate::keeper::keeper_rpc_client::KeeperRpcClient;
+use crate::keeper::Key;
 use crate::lab1::client::StorageClient;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use tribbler::storage::Storage;
 
 use tribbler::{
     err::TribResult,
@@ -94,6 +97,8 @@ async fn migration_join(
     new: usize,
     live_https: Vec<usize>,
     storage_clients: Vec<Arc<StorageClient>>,
+    last_keeper_clock: u64,
+    successor_keeper_client: Option<KeeperRpcClient<tonic::transport::Channel>>,
     // <bin, vector of migrated keys> -> prevent redundant operations
     migration_log: Option<HashSet<DoneEntry>>,
 ) -> TribResult<bool> {
@@ -101,6 +106,8 @@ async fn migration_join(
 
     let new_node_idx_in_live_https = lower_bound_in_list(&live_https.clone(), new);
     let succ = live_https[(new_node_idx_in_live_https + 1) % live_https_len as usize];
+
+    _ = storage_clients[new].clock(last_keeper_clock).await;
 
     let succ_bins = match fetch_all_bins(Arc::clone(&storage_clients[succ])).await {
         Ok(vec) => vec,
@@ -114,18 +121,19 @@ async fn migration_join(
 
     // If there are only two backends => copy all data from the old one to another
     if live_https_len == 2 {
-        for bin in succ_bins.iter() {
+        for bin in succ_bins {
             //tokio::spawn(async move {
             match bin_migration(
-                &bin,
+                &bin.clone(),
                 Arc::clone(&storage_clients[succ]),
                 Arc::clone(&storage_clients[new]),
                 migration_log.clone(),
+                successor_keeper_client.clone(),
             )
             .await
             {
                 Ok(_) => (),
-                Err(err) => return Err(err),
+                Err(_) => return Err("Migration err".into()),
             }
             //});
         }
@@ -145,6 +153,7 @@ async fn migration_join(
             Arc::clone(&storage_clients[succ]),
             Arc::clone(&storage_clients[new]),
             migration_log.clone(),
+            successor_keeper_client.clone(),
         )
         .await
         {
@@ -168,7 +177,7 @@ fn check_in_bound_wrap_around_inclusive(left: usize, right: usize, target: usize
         if target >= left && target <= right {
             return true;
         } else {
-            return true;
+            return false;
         }
     }
 }
@@ -179,6 +188,7 @@ async fn migration_crash(
     storage_clients: Vec<Arc<StorageClient>>,
     // <bin, vector of migrated keys> -> prevent redundant operations
     migration_log: Option<HashSet<DoneEntry>>,
+    successor_keeper_client: Option<KeeperRpcClient<tonic::transport::Channel>>,
 ) -> TribResult<bool> {
     let live_https_len = live_https.len();
     let succ_idx_in_live_https = lower_bound_in_list(&live_https, crashed);
@@ -212,6 +222,7 @@ async fn migration_crash(
                 storage_clients[pred].clone(),
                 storage_clients[succ].clone(),
                 migration_log.clone(),
+                successor_keeper_client.clone(),
             )
             .await
             {
@@ -230,6 +241,7 @@ async fn migration_crash(
                 storage_clients[succ].clone(),
                 storage_clients[next_succ].clone(),
                 migration_log.clone(),
+                successor_keeper_client.clone(),
             )
             .await
             {
@@ -248,6 +260,7 @@ async fn bin_migration(
     to: Arc<StorageClient>,
     // <vector of migrated keys> -> prevent redundant operations
     migration_log: Option<HashSet<DoneEntry>>,
+    successor_keeper_client: Option<KeeperRpcClient<tonic::transport::Channel>>,
 ) -> TribResult<bool> {
     // Copying KeyValue pair
     let keys = from
@@ -258,20 +271,19 @@ async fn bin_migration(
         .await?
         .0;
 
-    let mut log = HashSet::<DoneEntry>::new();
-    match migration_log {
-        Some(mlog) => {
-            log = mlog;
-        }
-        None => (),
-    }
+    // Check whether taking over the task from other keeper
+    // If not => set the hashset as empty set
+    let log = match migration_log {
+        Some(mlog) => mlog,
+        None => HashSet::<DoneEntry>::new(),
+    };
 
     // Get value from storage and append it to backend
     for key in keys.iter() {
         // Skip the key that has been migrated before
         let check_entry = DoneEntry {
             key_type: REGULARY_KEY_TYPE_STR.to_string(),
-            key: format!("{}::{}", bin_name, key.to_string()),
+            key: format!("{}::{}", bin_name, key),
         };
 
         if log.contains(&check_entry) {
@@ -293,7 +305,19 @@ async fn bin_migration(
             Ok(_) => (),
             Err(_) => return Err("Backend crashed when doing migration".into()),
         }
-        // send_key(regulary_key_tag, key)
+
+        match &successor_keeper_client {
+            Some(k) => {
+                let mut k_clone = k.clone();
+                _ = k_clone
+                    .send_key(Key {
+                        key_type: REGULARY_KEY_TYPE_STR.to_string(),
+                        key: format!("{}::{}", bin_name, key),
+                    })
+                    .await;
+            }
+            None => (),
+        }
     }
 
     // Copying list
@@ -338,7 +362,7 @@ async fn bin_migration(
         // Skip the key that has been migrated before
         let check_entry = DoneEntry {
             key_type: LIST_KEY_TYPE_STR.to_string(),
-            key: format!("{}::{}", bin_name, key.to_string()),
+            key: format!("{}::{}", bin_name, key),
         };
 
         if log.contains(&check_entry) {
@@ -382,7 +406,18 @@ async fn bin_migration(
             }
         }
         // Keeper sends keys to other keeper to acknowledge they finished copying this list
-        // send_key(list_key_tag, key)
+        match &successor_keeper_client {
+            Some(k) => {
+                let mut k_clone = k.clone();
+                _ = k_clone
+                    .send_key(Key {
+                        key_type: LIST_KEY_TYPE_STR.to_string(),
+                        key: format!("{}::{}", &bin_name, key),
+                    })
+                    .await;
+            }
+            None => (),
+        }
     }
 
     Ok(true)
@@ -393,12 +428,16 @@ pub async fn migration_event(
     live_https: Vec<usize>,
     storage_clients: Vec<Arc<StorageClient>>,
     migration_log: Option<HashSet<DoneEntry>>,
+    last_keeper_clock: u64,
+    successor_keeper_client: Option<KeeperRpcClient<tonic::transport::Channel>>,
 ) -> TribResult<bool> {
     if back_event.event_type == BackendEventType::Join {
         return migration_join(
             back_event.back_idx,
             live_https,
             storage_clients,
+            last_keeper_clock,
+            successor_keeper_client,
             migration_log,
         )
         .await;
@@ -409,6 +448,7 @@ pub async fn migration_event(
             live_https,
             storage_clients,
             migration_log,
+            successor_keeper_client,
         )
         .await;
     }

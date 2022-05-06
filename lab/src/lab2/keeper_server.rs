@@ -550,8 +550,8 @@ impl KeeperServer {
                             all_live_back_indices,
                             storage_clients_clones,
                             None,
-                            // global_max_clock,
-                            // successor_keeper_client,
+                            global_max_clock,
+                            successor_keeper_client,
                         )
                         .await
                         {
@@ -1164,15 +1164,18 @@ impl KeeperServer {
         drop(end_positions_lock);
 
         println!(
-            "[DEBUGGING] update_ranges: end_positions are {:?}",
-            end_positions
+            "[DEBUGGING] update_ranges: keeper {}'s end_positions are {:?}",
+            this, end_positions
         );
 
         let statuses_lock = statuses.read().await;
         let statuses = statuses_lock.clone();
         drop(statuses_lock);
 
-        println!("[DEBUGGING] update_ranges: stasuses are {:?}", statuses);
+        println!(
+            "[DEBUGGING] update_ranges: keeper {}'s statuses are {:?}",
+            this, statuses
+        );
 
         // get end positions of alive keepers
         let mut alive_vector = Vec::<u64>::new();
@@ -1586,8 +1589,8 @@ impl KeeperServer {
             all_live_back_indices,
             clients_for_scanning.clone(),
             Some(done_keys),
-            // last_keeper_clock,
-            // successor_keeper_client,
+            last_keeper_clock,
+            successor_keeper_client,
         )
         .await
         {
