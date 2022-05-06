@@ -40,7 +40,7 @@ impl StorageFaultToleranceClient {
 
     async fn remove_key_value(&self, storage: &StorageClient, kv: &KeyValue) -> TribResult<u32> {
         // Use MarkedValue structure format for comparing value
-        let mut list = match self.get_concat_list(storage, &kv.key).await {
+        let mut list = match self.get_dedup_concat_list_struct(storage, &kv.key).await {
             Ok(list) => list,
             Err(err) => return Err(err),
         };
@@ -78,13 +78,13 @@ impl StorageFaultToleranceClient {
 
     // Find the lower_bound
     fn lower_bound_in_list(&self, live_https: &Vec<usize>, num: usize) -> usize {
-        for https in live_https.iter() {
+        for (i, https) in live_https.iter().enumerate() {
             if https >= &num {
-                return https.clone();
+                return i;
             }
         }
 
-        return live_https[0];
+        return 0;
     }
 
     async fn find_target_backends(&self) -> TribResult<ReplicateIndices> {
@@ -97,20 +97,20 @@ impl StorageFaultToleranceClient {
         let live_https = self.live_http_back_addr_idx.read().await;
         let storage_clients_len = self.storage_clients.len();
         let primary_hash = hasher.finish() % storage_clients_len as u64;
-        let backup_hash = (primary_hash + 1) % storage_clients_len as u64;
 
+        // Get lower_bound for primary backend and the next backend as backup
         let primary_idx = self.lower_bound_in_list(live_https.deref(), primary_hash as usize);
-        let backup_idx = self.lower_bound_in_list(live_https.deref(), backup_hash as usize);
+        let backup_idx = (primary_idx + 1) % live_https.len() as usize;
 
         if primary_idx != backup_idx {
             return Ok(ReplicateIndices {
-                primary: primary_idx,
-                backup: Some(backup_idx),
+                primary: live_https[primary_idx],
+                backup: Some(live_https[backup_idx]),
             });
         }
 
         Ok(ReplicateIndices {
-            primary: primary_idx,
+            primary: live_https[primary_idx],
             backup: None,
         })
     }
@@ -136,7 +136,7 @@ impl StorageFaultToleranceClient {
         };
 
         // concatinate prefix and suffix lists and eliminate the overlapped part
-        let concat_list = match self.concat_two_list(&prefix_list, &suffix_list) {
+        let concat_list = match self.dedup_and_concat_two_list_struct(&prefix_list, &suffix_list) {
             Ok(list) => list,
             Err(err) => return Err(err),
         };
@@ -144,7 +144,7 @@ impl StorageFaultToleranceClient {
     }
 
     // The whole list with key and the output as vector of serialized string of MarkedValue structure.
-    async fn get_concat_list_string(
+    async fn get_dedup_concat_list_string(
         &self,
         storage: &StorageClient,
         key: &str,
@@ -163,10 +163,10 @@ impl StorageFaultToleranceClient {
             Err(err) => return Err(err),
         };
 
-        self.concat_two_list_string(&prefix_list, &suffix_list)
+        self.dedup_and_concat_two_list_string(&prefix_list, &suffix_list)
     }
 
-    async fn get_concat_list(
+    async fn get_dedup_concat_list_struct(
         &self,
         storage: &StorageClient,
         key: &str,
@@ -185,31 +185,20 @@ impl StorageFaultToleranceClient {
             Err(err) => return Err(err),
         };
 
-        self.concat_two_list(&prefix_list, &suffix_list)
+        self.dedup_and_concat_two_list_struct(&prefix_list, &suffix_list)
     }
 
     // concatinate two lists as MarkedValue struct
-    fn concat_two_list(
+    fn dedup_and_concat_two_list_struct(
         &self,
         prefix_list: &Vec<String>,
         suffix_list: &Vec<String>,
     ) -> TribResult<Vec<MarkedValue>> {
         let mut concat_list = Vec::<MarkedValue>::new();
 
-        // Manually for now => optimization
         if prefix_list.len() == 0 && suffix_list.len() == 0 {
             return Ok(concat_list);
         }
-        let overlapped_first: MarkedValue = match suffix_list.len() > 0 {
-            true => serde_json::from_str(&suffix_list[0])?,
-            false => MarkedValue {
-                backend_type: BackendType::NotDefined,
-                backend_id: 0,
-                clock: 0,
-                index: 0,
-                value: "".to_string(),
-            },
-        };
 
         let mut records = HashSet::<String>::new();
 
@@ -217,9 +206,6 @@ impl StorageFaultToleranceClient {
             let item_info: MarkedValue = serde_json::from_str(item)?;
             let unique_id: String =
                 format!("{}::{}", item_info.backend_id, item_info.clock).to_string();
-            if item_info == overlapped_first {
-                break;
-            }
             if !records.contains(&unique_id) {
                 concat_list.push(item_info);
                 records.insert(unique_id);
@@ -240,7 +226,7 @@ impl StorageFaultToleranceClient {
     }
 
     // concatinate two lists into serialized string
-    fn concat_two_list_string(
+    fn dedup_and_concat_two_list_string(
         &self,
         prefix_list: &Vec<String>,
         suffix_list: &Vec<String>,
@@ -250,25 +236,12 @@ impl StorageFaultToleranceClient {
         if prefix_list.len() == 0 && suffix_list.len() == 0 {
             return Ok(concat_list);
         }
-        let first_overlapped: MarkedValue = match suffix_list.len() > 0 {
-            true => serde_json::from_str(&suffix_list[0])?,
-            false => MarkedValue {
-                backend_type: BackendType::NotDefined,
-                backend_id: 0,
-                clock: 0,
-                index: 0,
-                value: "".to_string(),
-            },
-        };
 
         let mut records = HashSet::<String>::new();
         for item in prefix_list.iter() {
             let item_info: MarkedValue = serde_json::from_str(item)?;
             let unique_id: String =
                 format!("{}::{}", item_info.backend_id, item_info.clock).to_string();
-            if item_info == first_overlapped {
-                break;
-            }
             if !records.contains(&unique_id) {
                 records.insert(unique_id);
                 concat_list.push(item.clone().to_string());
@@ -506,7 +479,6 @@ impl KeyList for StorageFaultToleranceClient {
         let backend_indices = self.find_target_backends().await?;
         let primary = &self.storage_clients[backend_indices.primary];
 
-        let primary_list = self.get_processed_list(primary, &translated_key).await;
         let backup_list;
         match backend_indices.backup {
             Some(index) => {
@@ -519,6 +491,7 @@ impl KeyList for StorageFaultToleranceClient {
                 )))
             }
         };
+        let primary_list = self.get_processed_list(primary, &translated_key).await;
 
         // Get list from primary
         match primary_list {
@@ -559,7 +532,6 @@ impl KeyList for StorageFaultToleranceClient {
         let mut primary = &self.storage_clients[backend_indices.primary];
         let mut backup: Option<&StorageClient> = None;
 
-        let primary_list = self.get_processed_list(primary, &translated_key).await;
         let backup_list;
         match backend_indices.backup {
             Some(index) => {
@@ -572,6 +544,7 @@ impl KeyList for StorageFaultToleranceClient {
                 )))
             }
         };
+        let primary_list = self.get_processed_list(primary, &translated_key).await;
 
         // cases:
         // 1. primary and backup and primary as primary
@@ -649,7 +622,9 @@ impl KeyList for StorageFaultToleranceClient {
         };
 
         result = primary.list_append(&translated_kv).await;
-        let primary_appended_list = self.get_concat_list_string(primary, &kv.key).await?;
+        let primary_appended_list = self
+            .get_dedup_concat_list_string(primary, &translated_key)
+            .await?;
 
         // Get index in the concat list
         let index = self
