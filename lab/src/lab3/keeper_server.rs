@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use std::cmp;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -35,20 +34,20 @@ pub struct BackendEvent {
 }
 
 pub struct KeeperServer {
-    pub backs: Arc<RwLock<Vec<String>>>,       // backend addresses
-    pub keeper_addrs: Arc<RwLock<Vec<String>>>,       // keeper addresses
-    pub statuses: Arc<RwLock<Vec<bool>>>,      // keeper statuses
-    pub end_positions: Arc<RwLock<Vec<u64>>>,  // keeper end positions on the ring
-    pub manage_range: Arc<RwLock<(u64, u64)>>, // keeper range
-    pub pre_manage_range: Arc<RwLock<(u64, u64)>>, // predecessor range
-    pub this: Arc<RwLock<usize>>,              // the index of this keeper
-    pub keeper_clock: Arc<RwLock<u64>>,           // keeper_clock of this keeper
+    pub backs: Arc<RwLock<Vec<String>>>,        // backend addresses
+    pub keeper_addrs: Arc<RwLock<Vec<String>>>, // keeper addresses
+    pub statuses: Arc<RwLock<Vec<bool>>>,       // keeper statuses
+    pub end_positions: Arc<RwLock<Vec<u64>>>,   // keeper end positions on the ring
+    pub this: Arc<RwLock<usize>>,               // the index of this keeper
+    pub keeper_clock: Arc<RwLock<u64>>,         // keeper_clock of this keeper
     pub key_list: Arc<RwLock<HashSet<String>>>, // store the keys of finsihed lists to help migration
     pub event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
     pub event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
+    pub latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+    pub predecessor_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
     pub ack_to_predecessor_time: Arc<RwLock<Instant>>, // the most recent acknowledging event
-    pub event_handling_mutex: Arc<Mutex<u64>>,    // event/time mutex
-    pub initializing: Arc<RwLock<bool>>,          // if this keeper is initializing
+    pub event_handling_mutex: Arc<Mutex<u64>>,         // event/time mutex
+    pub initializing: Arc<RwLock<bool>>,               // if this keeper is initializing
     pub keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>, // keeper connections
     pub keeper_client: Arc<RwLock<Option<KeeperClient>>>,
 }
@@ -61,7 +60,8 @@ impl KeeperServer {
         let mut statuses = Vec::<bool>::new();
         let mut end_positions = Vec::<u64>::new();
         let manage_num = MAX_BACKEND_NUM / (keeper_addrs.len() as u64); // use 300 directly to avoid edge cases of using backs.len()
-        let mut keeper_client_opts = Vec::<Option<KeeperRpcClient<tonic::transport::Channel>>>::new();
+        let mut keeper_client_opts =
+            Vec::<Option<KeeperRpcClient<tonic::transport::Channel>>>::new();
         for idx in 0..keeper_addrs.len() {
             statuses.push(false);
             let end_position = (idx as u64 + 1) * manage_num - 1;
@@ -88,13 +88,13 @@ impl KeeperServer {
             keeper_addrs: Arc::new(RwLock::new(keeper_addrs)),
             statuses: Arc::new(RwLock::new(statuses)),
             end_positions: Arc::new(RwLock::new(end_positions)),
-            pre_manage_range: Arc::new(RwLock::new((0, 0))),
-            manage_range: Arc::new(RwLock::new((0, 0))),
             this: Arc::new(RwLock::new(this)),
             keeper_clock: Arc::new(RwLock::new(0)),
             key_list: Arc::new(RwLock::new(HashSet::<String>::new())),
             event_detected_by_this: Arc::new(RwLock::new(Some(detected_backend_event))),
             event_acked_by_successor: Arc::new(RwLock::new(Some(acked_backend_event))),
+            latest_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
+            predecessor_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
             ack_to_predecessor_time: Arc::new(RwLock::new(Instant::now())),
             event_handling_mutex: Arc::new(Mutex::new(0)),
             initializing: Arc::new(RwLock::new(true)),
@@ -107,13 +107,13 @@ impl KeeperServer {
             Arc::clone(&keeper_server.keeper_addrs),
             Arc::clone(&keeper_server.statuses),
             Arc::clone(&keeper_server.end_positions),
-            Arc::clone(&keeper_server.pre_manage_range),
-            Arc::clone(&keeper_server.manage_range),
             Arc::clone(&keeper_server.this),
             Arc::clone(&keeper_server.keeper_clock),
             Arc::clone(&keeper_server.key_list),
             Arc::clone(&keeper_server.event_detected_by_this),
             Arc::clone(&keeper_server.event_acked_by_successor),
+            Arc::clone(&keeper_server.latest_monitoring_range_inclusive),
+            Arc::clone(&keeper_server.predecessor_monitoring_range_inclusive),
             Arc::clone(&keeper_server.ack_to_predecessor_time),
             Arc::clone(&keeper_server.event_handling_mutex),
             Arc::clone(&keeper_server.initializing),
@@ -124,7 +124,7 @@ impl KeeperServer {
 }
 
 #[async_trait]
-impl keeper::trib_storage_server::KeeperRpc for KeeperServer {
+impl keeper::keeper_rpc_server::KeeperRpc for KeeperServer {
     async fn send_clock(
         &self,
         request: tonic::Request<Clock>,
@@ -155,9 +155,9 @@ impl keeper::trib_storage_server::KeeperRpc for KeeperServer {
         // step 2: join after knowing other keepers are not initializing
         let guard = self.event_handling_mutex.lock();
         let current_time = Instant::now();
-
         let event_detected_by_this = self.event_detected_by_this.read().await;
-        let event_detected = event_detected_by_this.as_ref().unwrap();
+        let event_detected = event_detected_by_this.as_ref().unwrap().clone();
+        drop(event_detected_by_this);
         let mut return_event = "None".to_string();
         let mut back_idx = 0;
         let detecting_time = event_detected.timestamp;
@@ -180,55 +180,15 @@ impl keeper::trib_storage_server::KeeperRpc for KeeperServer {
         }
         let initializing = self.initializing.read().await;
         let return_initializing = initializing.clone();
+        drop(initializing);
 
         // change the state of the predecessor
         let mut statuses = self.statuses.write().await;
         statuses[received_request.idx as usize] = true;
-        let this = self.this.read().await;
-        // get end positions of alive keepers
-        let keeper_addrs = self.keeper_addrs.read().await;
-        let mut alive_vector = Vec::<u64>::new();
-        let end_positions = self.end_positions.read().await;
-        for idx in 0..keeper_addrs.len() {
-            if statuses[idx] {
-                alive_vector.push(end_positions[idx]);
-            }
-        }
-        // get the range
-        let mut pre_manage_range = self.pre_manage_range.write().await;
-        let mut manage_range = self.manage_range.write().await;
-        let alive_num = alive_vector.len();
-        if alive_num == 1 {
-            *pre_manage_range = (
-                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
-                end_positions[*this],
-            );
-            *manage_range = (
-                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
-                end_positions[*this],
-            );
-        } else {
-            for idx in 0..alive_num {
-                if alive_vector[idx] == end_positions[*this] {
-                    let start_idx = ((idx - 1) + alive_num) % alive_num;
-                    let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
-                    *pre_manage_range = (
-                        (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM,
-                        alive_vector[start_idx],
-                    );
-                    *manage_range = (
-                        (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM,
-                        alive_vector[idx],
-                    );
-                }
-            }
-        }
-        drop(this);
-        drop(keeper_addrs);
-        drop(pre_manage_range);
-        drop(manage_range);
-        drop(event_detected_by_this);
-        drop(initializing);
+        // update the range
+        let keeper_client = self.keeper_client.write().await;
+        let _update_result = keeper_client.as_ref().unwrap().update_ranges().await;
+
         drop(guard);
         return Ok(Response::new(Acknowledgement {
             event_type: return_event,
@@ -254,7 +214,3 @@ impl keeper::trib_storage_server::KeeperRpc for KeeperServer {
 // When a keeper joins, it needs to know if it's at the starting phase.
 // 1) If it finds a working keeper => normal join
 // 2) else => starting phase
-
-// TODO
-// sync the fields
-// separate the two structs

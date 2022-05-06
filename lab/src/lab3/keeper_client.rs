@@ -15,60 +15,58 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
-use tonic::Response;
-use tribbler::config::KeeperConfig;
 use tribbler::err::TribResult;
 
 const MAX_BACKEND_NUM: u64 = 300;
 pub struct KeeperClient {
-    pub backs: Arc<RwLock<Vec<String>>>,       // backend addresses
-    pub addrs: Arc<RwLock<Vec<String>>>,       // keeper addresses
-    pub statuses: Arc<RwLock<Vec<bool>>>,      // keeper statuses
-    pub end_positions: Arc<RwLock<Vec<u64>>>,  // keeper end positions on the ring
-    pub manage_range: Arc<RwLock<(u64, u64)>>, // keeper range
-    pub pre_manage_range: Arc<RwLock<(u64, u64)>>, // predecessor range
-    pub this: Arc<RwLock<usize>>,              // the index of this keeper
-    pub timestamp: Arc<RwLock<u64>>,           // timestamp of this keeper
+    pub backs: Arc<RwLock<Vec<String>>>,        // backend addresses
+    pub keeper_addrs: Arc<RwLock<Vec<String>>>, // keeper addresses
+    pub statuses: Arc<RwLock<Vec<bool>>>,       // keeper statuses
+    pub end_positions: Arc<RwLock<Vec<u64>>>,   // keeper end positions on the ring
+    pub this: Arc<RwLock<usize>>,               // the index of this keeper
+    pub keeper_clock: Arc<RwLock<u64>>,         // keeper_clock of this keeper
     pub key_list: Arc<RwLock<HashSet<String>>>, // store the keys of finsihed lists to help migration
     pub event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
     pub event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
-    pub acknowledging_time: Arc<RwLock<Instant>>, // the most recent acknowledging event
-    pub event_handling_mutex: Arc<Mutex<u64>>,    // event/time mutex
-    pub initializing: Arc<RwLock<bool>>,          // if this keeper is initializing
+    pub latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+    pub predecessor_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+    pub ack_to_predecessor_time: Arc<RwLock<Instant>>, // the most recent acknowledging event
+    pub event_handling_mutex: Arc<Mutex<u64>>,         // event/time mutex
+    pub initializing: Arc<RwLock<bool>>,               // if this keeper is initializing
     pub keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>, // keeper connections
 }
 
 impl KeeperClient {
     pub fn new(
         backs: Arc<RwLock<Vec<String>>>,
-        addrs: Arc<RwLock<Vec<String>>>,
+        keeper_addrs: Arc<RwLock<Vec<String>>>,
         statuses: Arc<RwLock<Vec<bool>>>,
         end_positions: Arc<RwLock<Vec<u64>>>,
-        manage_range: Arc<RwLock<(u64, u64)>>,
-        pre_manage_range: Arc<RwLock<(u64, u64)>>,
         this: Arc<RwLock<usize>>,
-        timestamp: Arc<RwLock<u64>>,
+        keeper_clock: Arc<RwLock<u64>>,
         key_list: Arc<RwLock<HashSet<String>>>,
         event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
         event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
-        acknowledging_time: Arc<RwLock<Instant>>,
+        latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+        predecessor_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+        ack_to_predecessor_time: Arc<RwLock<Instant>>,
         event_handling_mutex: Arc<Mutex<u64>>,
         initializing: Arc<RwLock<bool>>,
         keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>,
     ) -> KeeperClient {
         KeeperClient {
             backs,
-            addrs,
+            keeper_addrs,
             statuses,
             end_positions,
-            manage_range,
-            pre_manage_range,
             this,
-            timestamp,
+            keeper_clock,
             key_list,
             event_detected_by_this,
             event_acked_by_successor,
-            acknowledging_time,
+            latest_monitoring_range_inclusive,
+            predecessor_monitoring_range_inclusive,
+            ack_to_predecessor_time,
             event_handling_mutex,
             initializing,
             keeper_client_opts,
@@ -81,7 +79,7 @@ impl KeeperClient {
         let mut keeper_client_opts = Arc::clone(&self.keeper_client_opts).lock_owned().await;
         // To prevent unnecessary reconnection, we only connect if we haven't.
         if let None = keeper_client_opts[idx] {
-            let addr = &self.addrs.read().await[idx];
+            let addr = &self.keeper_addrs.read().await[idx];
             keeper_client_opts[idx] = Some(KeeperRpcClient::connect(addr.clone()).await?);
             drop(addr);
         }
@@ -108,7 +106,7 @@ impl KeeperClient {
         };
         drop(keeper_client_opts);
 
-        let timestamp = self.timestamp.read().await;
+        let timestamp = self.keeper_clock.read().await;
         let acknowledgement = client
             .send_clock(Clock {
                 timestamp: *timestamp,
@@ -140,7 +138,7 @@ impl KeeperClient {
     }
 
     pub async fn initialization(&self) -> TribResult<bool> {
-        let addrs = self.addrs.read().await;
+        let addrs = self.keeper_addrs.read().await;
         let this = self.this.read().await;
         let mut normal_join = false; // if this is a normal join operation
         let start_time = Instant::now();
@@ -178,49 +176,10 @@ impl KeeperClient {
             }
             current_time = Instant::now(); // reset current time
         }
-
-        // get end positions of alive keepers
-        let mut alive_vector = Vec::<u64>::new();
-        let statuses = self.statuses.read().await;
-        let end_positions = self.end_positions.read().await;
-        for idx in 0..addrs.len() {
-            if statuses[idx] {
-                alive_vector.push(end_positions[idx]);
-            }
-        }
-        // get the range
-        let mut pre_manage_range = self.pre_manage_range.write().await;
-        let mut manage_range = self.manage_range.write().await;
-        let alive_num = alive_vector.len();
-        if alive_num == 1 {
-            *pre_manage_range = (
-                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
-                end_positions[*this],
-            );
-            *manage_range = (
-                (end_positions[*this] + 1) % MAX_BACKEND_NUM,
-                end_positions[*this],
-            );
-        } else {
-            for idx in 0..alive_num {
-                if alive_vector[idx] == end_positions[*this] {
-                    let start_idx = ((idx - 1) + alive_num) % alive_num;
-                    let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
-                    *pre_manage_range = (
-                        (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM,
-                        alive_vector[start_idx],
-                    );
-                    *manage_range = (
-                        (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM,
-                        alive_vector[idx],
-                    );
-                }
-            }
-        }
         drop(this);
         drop(addrs);
-        drop(pre_manage_range);
-        drop(manage_range);
+        // update the range
+        let _update_result = self.update_ranges().await;
 
         if normal_join {
             // scan the backends and sleep for a specific amount of time
@@ -229,7 +188,7 @@ impl KeeperClient {
 
             // find the successor
             let this = self.this.read().await;
-            let addrs = self.addrs.read().await;
+            let addrs = self.keeper_addrs.read().await;
             let statuses = self.statuses.read().await;
             let mut successor_index = *this;
             for idx in *this + 1..addrs.len() {
@@ -279,6 +238,7 @@ impl KeeperClient {
                     Err(_) => (),
                 }
             }
+            drop(this);
         } else {
             // starting phase
             // scan to maintain the backends
@@ -288,5 +248,76 @@ impl KeeperClient {
         *initializing = false;
         drop(initializing);
         Ok(true) // can send the ready signal
+    }
+
+    pub async fn update_ranges(&self) -> TribResult<()> {
+        let keeper_addrs = self.keeper_addrs.read().await;
+        let end_positions = self.end_positions.read().await;
+        let statuses = self.statuses.read().await;
+        let this = self.this.read().await;
+        let mut predecessor_monitoring_range_inclusive =
+            self.predecessor_monitoring_range_inclusive.write().await;
+        let mut latest_monitoring_range_inclusive =
+            self.latest_monitoring_range_inclusive.write().await;
+        let backs = self.backs.read().await;
+        let mut alive_vector = Vec::<u64>::new();
+        let back_num = backs.len();
+        // get end positions of alive keepers
+        for idx in 0..keeper_addrs.len() {
+            if statuses[idx] {
+                alive_vector.push(end_positions[idx]);
+            }
+        }
+        // get the range
+        let alive_num = alive_vector.len();
+        if alive_num == 1 {
+            *predecessor_monitoring_range_inclusive = None;
+            let end_position = end_positions[*this];
+            let start_position = (end_position + 1) % MAX_BACKEND_NUM;
+            if start_position >= back_num as u64 && end_position >= back_num as u64 {
+                *latest_monitoring_range_inclusive = None;
+            } else if start_position >= back_num as u64 {
+                *latest_monitoring_range_inclusive = Some((0, end_position as usize));
+            } else if end_position >= back_num as u64 {
+                *latest_monitoring_range_inclusive = Some((start_position as usize, back_num - 1));
+            }
+        } else {
+            for idx in 0..alive_num {
+                if alive_vector[idx] == end_positions[*this] {
+                    let start_idx = ((idx - 1) + alive_num) % alive_num;
+                    let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
+                    let start_position = (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM;
+                    let end_position = end_positions[*this];
+                    if start_position >= back_num as u64 && end_position >= back_num as u64 {
+                        *latest_monitoring_range_inclusive = None
+                    } else if start_position >= back_num as u64 {
+                        *latest_monitoring_range_inclusive = Some((0, end_position as usize));
+                    } else if end_position >= back_num as u64 {
+                        *latest_monitoring_range_inclusive =
+                            Some((start_position as usize, back_num - 1));
+                    }
+
+                    let pre_start_position = (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM;
+                    let pre_end_position = start_position - 1;
+                    if pre_start_position >= back_num as u64 && pre_end_position >= back_num as u64
+                    {
+                        *predecessor_monitoring_range_inclusive = None
+                    } else if pre_start_position >= back_num as u64 {
+                        *predecessor_monitoring_range_inclusive = Some((0, pre_end_position as usize));
+                    } else if pre_end_position >= back_num as u64 {
+                        *predecessor_monitoring_range_inclusive =
+                            Some((pre_start_position as usize, back_num - 1));
+                    }
+                }
+            }
+        }
+        drop(keeper_addrs);
+        drop(end_positions);
+        drop(statuses);
+        drop(this);
+        drop(latest_monitoring_range_inclusive);
+        drop(predecessor_monitoring_range_inclusive);
+        drop(backs);
+        Ok(())
     }
 }
