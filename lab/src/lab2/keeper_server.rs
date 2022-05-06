@@ -1,6 +1,5 @@
 use crate::keeper::keeper_rpc_client::KeeperRpcClient;
 use crate::lab1::client::StorageClient;
-use crate::lab3::keeper_client::KeeperClient;
 use std::collections::HashSet;
 use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
@@ -114,7 +113,6 @@ pub struct KeeperServer {
     pub log_entries: Arc<RwLock<Vec<LogEntry>>>, // store the keys of finsihed lists to help migration
     pub initializing: Arc<RwLock<bool>>,         // if this keeper is initializing
     pub keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>, // keeper connections
-    pub keeper_client: Arc<RwLock<Option<KeeperClient>>>,
 }
 
 impl KeeperServer {
@@ -153,7 +151,7 @@ impl KeeperServer {
         }
         statuses[this] = true;
 
-        let mut keeper_server = KeeperServer {
+        let keeper_server = KeeperServer {
             http_back_addrs: http_back_addrs,
             storage_clients: storage_clients,
             keeper_addrs: keeper_addrs,
@@ -184,7 +182,6 @@ impl KeeperServer {
             log_entries: Arc::new(RwLock::new(Vec::<LogEntry>::new())),
             initializing: Arc::new(RwLock::new(true)),
             keeper_client_opts: Arc::new(Mutex::new(keeper_client_opts)),
-            keeper_client: Arc::new(RwLock::new(None)),
         };
 
         Ok(keeper_server)
@@ -804,7 +801,6 @@ impl KeeperServer {
         log_entries: Arc<RwLock<Vec<LogEntry>>>, // store the keys of finsihed lists to help migration
         initializing: Arc<RwLock<bool>>,         // if this keeper is initializing
         keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>, // keeper connections
-        keeper_client: Arc<RwLock<Option<KeeperClient>>>,
         join_handles_to_abort: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     ) -> TribResult<()> {
         Self::initialization(
@@ -831,9 +827,9 @@ impl KeeperServer {
             ready_sender.send(true)?;
         }
         drop(ready_sender_opt);
-        
+
         // TESTING
-        let range = latest_monitoring_range_inclusive.lock().await;
+        let range = latest_monitoring_range_inclusive.write().await;
         println!("Our range is: {:?}", range);
         drop(range);
 
@@ -946,7 +942,6 @@ impl KeeperServer {
         let log_entries_clone = self.log_entries.clone();
         let initializing_clone = self.initializing.clone();
         let keeper_client_opts_clone = self.keeper_client_opts.clone();
-        let keeper_client_clone = self.keeper_client.clone();
 
         let join_handles_to_abort_clone = join_handles_to_abort.clone();
 
@@ -973,7 +968,6 @@ impl KeeperServer {
                 log_entries_clone,
                 initializing_clone,
                 keeper_client_opts_clone,
-                keeper_client_clone,
                 join_handles_to_abort_clone,
             )
             .await
@@ -1113,15 +1107,7 @@ impl KeeperServer {
         let alive_num = alive_vector.len();
         if alive_num == 1 {
             *predecessor_monitoring_range_inclusive = None;
-            let end_position = end_positions[this];
-            let start_position = (end_position + 1) % MAX_BACKEND_NUM;
-            if start_position >= back_num as u64 && end_position >= back_num as u64 {
-                *latest_monitoring_range_inclusive = None;
-            } else if start_position >= back_num as u64 {
-                *latest_monitoring_range_inclusive = Some((0, end_position as usize));
-            } else if end_position >= back_num as u64 {
-                *latest_monitoring_range_inclusive = Some((start_position as usize, back_num - 1));
-            }
+            *latest_monitoring_range_inclusive = Some((0, back_num - 1 as usize));
         } else {
             for idx in 0..alive_num {
                 if alive_vector[idx] == end_positions[this] {
@@ -1129,8 +1115,11 @@ impl KeeperServer {
                     let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
                     let start_position = (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM;
                     let end_position = end_positions[this];
-                    if start_position >= back_num as u64 && end_position >= back_num as u64 {
-                        *latest_monitoring_range_inclusive = None
+                    if start_position >= back_num as u64
+                        && end_position >= back_num as u64
+                        && start_position <= end_position
+                    {
+                        *latest_monitoring_range_inclusive = None;
                     } else if start_position >= back_num as u64 {
                         *latest_monitoring_range_inclusive = Some((0, end_position as usize));
                     } else if end_position >= back_num as u64 {
@@ -1140,7 +1129,9 @@ impl KeeperServer {
 
                     let pre_start_position = (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM;
                     let pre_end_position = start_position - 1;
-                    if pre_start_position >= back_num as u64 && pre_end_position >= back_num as u64
+                    if pre_start_position >= back_num as u64
+                        && pre_end_position >= back_num as u64
+                        && start_position <= end_position
                     {
                         *predecessor_monitoring_range_inclusive = None
                     } else if pre_start_position >= back_num as u64 {
