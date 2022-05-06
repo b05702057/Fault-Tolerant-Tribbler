@@ -174,7 +174,7 @@ impl KeeperServer {
                 // Clone clients since later moving into async for tokio spawn async execution.
                 let storage_clients_clones = clients_for_scanning.clone();
 
-                let mut keeper_clock_lock = keeper_clock.read().await;
+                let keeper_clock_lock = keeper_clock.read().await;
                 let global_max_clock = *keeper_clock_lock;
                 drop(keeper_clock_lock);
 
@@ -404,7 +404,7 @@ impl KeeperServer {
                     // This logic can be blocking since, no need to scan if this is in progress, since no new backend
                     // events will happen during that period
                     if should_handle_event {
-                        // TODO
+                        // TODO wait 5 seconds and then migration etc.
                     }
                 }
             }
@@ -427,6 +427,7 @@ impl KeeperServer {
     // Performs scan on clients in range and returns live_backend_indexes from that range as well as the max clock
     // Range_to_scan (start_idx, end_idx) may have start_idx > end_idx, in which case we wrap around
     // Assume storage_clients are client vec for all backends
+    // Returns (live_back_indices_in_range, max_clock_received)
     async fn single_scan_and_sync(
         storage_clients: Vec<Arc<StorageClient>>,
         range_to_scan: (usize, usize),
