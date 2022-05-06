@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Hash)]
 pub enum BackendType {
     Primary,
     Backup,
     NotDefined,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Hash)]
 pub struct MarkedValue {
     pub backend_type: BackendType,
     pub backend_id: usize,

@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tribbler::{
@@ -94,12 +93,16 @@ impl StorageFaultToleranceClient {
         let mut hasher = DefaultHasher::new();
         name.hash(&mut hasher);
 
-        let live_https = self.live_http_back_addr_idx.read().await;
+        let live_https_guard = self.live_http_back_addr_idx.read().await;
+        let mut live_https = (*live_https_guard).clone();
+        drop(live_https_guard);
         let storage_clients_len = self.storage_clients.len();
         let primary_hash = hasher.finish() % storage_clients_len as u64;
 
+        live_https.sort();
+
         // Get lower_bound for primary backend and the next backend as backup
-        let primary_idx = self.lower_bound_in_list(live_https.deref(), primary_hash as usize);
+        let primary_idx = self.lower_bound_in_list(&live_https, primary_hash as usize);
         let backup_idx = (primary_idx + 1) % live_https.len() as usize;
 
         if primary_idx != backup_idx {
@@ -269,7 +272,6 @@ impl StorageFaultToleranceClient {
         let mut sorted_list = Vec::<String>::new();
 
         for item in list_iter {
-            // not sure if this is a good pattern since "::" here might not be unique
             if item.backend_type == BackendType::Primary {
                 if sublist.len() > 0 {
                     sublist.sort();
@@ -333,7 +335,7 @@ impl KeyString for StorageFaultToleranceClient {
             }
             // When visited a working backend server before
             // If we cannot get the result might because the "primary" has not finished migration
-            // Try to get from backup
+            // Try getting from backup
             Ok(None) => match backend_indices.backup {
                 Some(index) => {
                     let backup = &self.storage_clients[index];
@@ -622,9 +624,7 @@ impl KeyList for StorageFaultToleranceClient {
         };
 
         result = primary.list_append(&translated_kv).await;
-        let primary_appended_list = self
-            .get_dedup_concat_list_string(primary, &translated_key)
-            .await?;
+        let primary_appended_list = self.get_dedup_concat_list_string(primary, &kv.key).await?;
 
         // Get index in the concat list
         let index = self
@@ -698,6 +698,7 @@ impl KeyList for StorageFaultToleranceClient {
 
     /// List all the keys of non-empty lists, where the key matches
     /// the given pattern.
+    ///
     async fn list_keys(&self, p: &Pattern) -> TribResult<List> {
         let bin_name_and_separator_prefix = format!("{}::", self.bin_name);
         let translated_prefix = format!(
@@ -724,11 +725,12 @@ impl KeyList for StorageFaultToleranceClient {
         let primary = &self.storage_clients[backend_indices.primary];
 
         // Insert all the matching keys in primary and backups to hashset
-        // then we don't need to do the comparison since one should be a subset of another or its the same
+        // then we don't need to do the comparison since one should be a subset of another or they are the same
         match primary.list_keys(&prefix_translated_pattern).await {
             Ok(List(keys)) => {
                 for k in keys.iter() {
-                    matched_keys.insert(k.clone().to_string());
+                    let key_split: Vec<&str> = k.split(PREFIX).collect();
+                    matched_keys.insert(key_split[1].to_string());
                 }
             }
             Err(_) => (),
@@ -736,7 +738,8 @@ impl KeyList for StorageFaultToleranceClient {
         match primary.list_keys(&suffix_translated_pattern).await {
             Ok(List(keys)) => {
                 for k in keys.iter() {
-                    matched_keys.insert(k.clone().to_string());
+                    let key_split: Vec<&str> = k.split(SUFFIX).collect();
+                    matched_keys.insert(key_split[1].to_string());
                 }
             }
             Err(_) => (),
@@ -748,7 +751,8 @@ impl KeyList for StorageFaultToleranceClient {
                 match backup.list_keys(&prefix_translated_pattern).await {
                     Ok(List(keys)) => {
                         for k in keys.iter() {
-                            matched_keys.insert(k.clone().to_string());
+                            let key_split: Vec<&str> = k.split(PREFIX).collect();
+                            matched_keys.insert(key_split[1].to_string());
                         }
                     }
                     Err(_) => (),
@@ -756,7 +760,8 @@ impl KeyList for StorageFaultToleranceClient {
                 match backup.list_keys(&suffix_translated_pattern).await {
                     Ok(List(keys)) => {
                         for k in keys.iter() {
-                            matched_keys.insert(k.clone().to_string());
+                            let key_split: Vec<&str> = k.split(SUFFIX).collect();
+                            matched_keys.insert(key_split[1].to_string());
                         }
                     }
                     Err(_) => (),

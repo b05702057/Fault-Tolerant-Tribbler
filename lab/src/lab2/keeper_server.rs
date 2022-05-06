@@ -1,6 +1,8 @@
+use super::migration::migration_event;
 use crate::keeper::keeper_rpc_client::KeeperRpcClient;
 use crate::lab1::client::StorageClient;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::Receiver, Mutex, RwLock};
@@ -498,6 +500,20 @@ impl KeeperServer {
                         let storage_clients_clones = clients_for_scanning.clone();
 
                         // TODO call migration event passing in all_live_back_indices, event, and storage_clients_clones
+
+                        // Temp input for migration log
+                        let migration_log = HashMap::<String, Vec<String>>::new();
+                        match migration_event(
+                            &event,
+                            all_live_back_indices,
+                            storage_clients_clones,
+                            migration_log,
+                        )
+                        .await
+                        {
+                            Ok(_) => (),
+                            Err(_) => return Err("Migration err".into()),
+                        }
                     }
                 }
             }
