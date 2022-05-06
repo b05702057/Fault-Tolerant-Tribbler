@@ -46,6 +46,7 @@ pub struct BackendEvent {
 
 pub struct LogEntry {
     pub key: String,
+    pub key_type: String,
     pub timestamp: Instant, // use the timestamp to know if it belongs to the current event
 }
 
@@ -1056,6 +1057,7 @@ impl KeeperServer {
         keeper_addrs: Vec<String>,
         idx: usize,
         key: String,
+        key_type: String,
     ) -> TribResult<bool> {
         Self::connect(Arc::clone(&keeper_client_opts), keeper_addrs, idx).await?;
         let keeper_client_opts = Arc::clone(&keeper_client_opts).lock_owned().await;
@@ -1068,7 +1070,7 @@ impl KeeperServer {
             None => return Err("Client was somehow not connected / be initialized!".into()),
         };
         drop(keeper_client_opts); // client_opt needs the lock
-        client.send_key(Key { key }).await?;
+        client.send_key(Key { key, key_type }).await?;
         Ok(true)
     }
 
@@ -1486,10 +1488,11 @@ impl keeper::keeper_rpc_server::KeeperRpc for KeeperServer {
         request: tonic::Request<Key>,
     ) -> Result<tonic::Response<Bool>, tonic::Status> {
         // record the log entry to avoid repetitive migration
-        let received_key = request.into_inner().key;
+        let received_key = request.into_inner();
         let mut log_entries = self.log_entries.write().await;
         log_entries.push(LogEntry {
-            key: received_key,
+            key: received_key.key,
+            key_type: received_key.key_type,
             timestamp: Instant::now(),
         });
 
