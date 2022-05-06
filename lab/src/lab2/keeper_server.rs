@@ -576,6 +576,8 @@ impl KeeperServer {
 
     pub async fn serve(&mut self) -> TribResult<()> {
 
+        // TODO ONLY SEND ONCE READY!!
+        
         let ready_sender_opt = self.ready_sender_opt.lock().await;
         // Send ready
         if let Some(ready_sender) = &*ready_sender_opt {

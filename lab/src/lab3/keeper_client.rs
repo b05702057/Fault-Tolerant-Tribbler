@@ -178,8 +178,8 @@ impl KeeperClient {
 
         if normal_join {
             // scan the backends and sleep for a specific amount of time
-            // todo!();
-            thread::sleep(Duration::from_secs(4)); // sleep after the first scan
+            // todo!(); TODO
+            tokio::time::sleep(Duration::from_secs(4)); // sleep after the first scan
 
             // find the successor
             let this = self.this;
