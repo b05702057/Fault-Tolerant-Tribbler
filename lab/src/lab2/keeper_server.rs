@@ -33,14 +33,14 @@ pub struct LiveBackendsView {
     pub live_backend_indices_in_range: Vec<usize>,
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum BackendEventType {
     Join,
     Leave,
     None, // Only for RPC to save type.
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BackendEvent {
     pub event_type: BackendEventType,
     pub back_idx: usize,
@@ -56,7 +56,7 @@ pub struct LogEntry {
 
 impl Eq for LogEntry {}
 
-#[derive(PartialEq, Clone, Hash)]
+#[derive(PartialEq, Clone, Hash, Debug)]
 pub struct DoneEntry {
     pub key: String,
     pub key_type: String,
@@ -543,6 +543,9 @@ impl KeeperServer {
                                 None => None,
                             };
                         }
+
+                        println!("\n[DEBUGGING] ----------Regular migration started!-----------\n");
+                        println!("event is: {:?}", &event);
 
                         // TODO call migration event passing in all_live_back_indices, event, and storage_clients_clones
                         match migration_event(
@@ -1582,6 +1585,11 @@ impl KeeperServer {
         let keeper_clock_lock = keeper_clock.read().await;
         let last_keeper_clock = *keeper_clock_lock;
         drop(keeper_clock_lock);
+
+        println!("\n[DEBUGGING] ----------Take over migration started!-----------\n");
+        println!("event is: {:?}", &back_ev);
+        println!("live_https is: {:?}", &all_live_back_indices);
+        println!("done_keys is: {:?}", &done_keys);
 
         // TODO Call migration using storage_client_clones, all_live_back_indices, last_keeper_clock, successor_keeper_client, back_ev
         match migration_event(

@@ -358,6 +358,11 @@ async fn bin_migration(
 
     let list_keys: Vec<String> = list_keys_hs.into_iter().collect();
 
+    println!(
+        "[DEBUGGING] bin_migration: keys to migrate are {:?}",
+        &list_keys
+    );
+
     for key in list_keys.iter() {
         // Skip the key that has been migrated before
         let check_entry = DoneEntry {

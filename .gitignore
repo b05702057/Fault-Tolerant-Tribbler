@@ -9,3 +9,4 @@ www/package-lock.json
 lab/src/keeper.rs
 bins.json
 update-docs.sh
+lab/tests/lab2_test.rs
