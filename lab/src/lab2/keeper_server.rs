@@ -2,10 +2,11 @@ use super::migration::migration_event;
 use crate::keeper::keeper_rpc_client::KeeperRpcClient;
 use crate::lab1::client::StorageClient;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::Receiver, Mutex, RwLock};
+
+use tonic::Response;
 use tribbler::{config::KeeperConfig, err::TribResult, storage::Storage};
 
 use crate::{
@@ -15,11 +16,11 @@ use crate::{
 
 use async_trait::async_trait;
 use std::cmp;
-use tonic::Response;
-
 const KEEPER_SCAN_AND_SYNC_BACKEND_INTERVAL: Duration = Duration::from_secs(2);
 const KEEPER_WAIT_UPON_EVENT_DETECTION_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_BACKEND_NUM: u64 = 300;
+pub const LIST_KEY_TYPE_STR: &str = "list_key_type";
+pub const REGULARY_KEY_TYPE_STR: &str = "regular_key_type";
 
 #[derive(Clone)]
 pub struct LiveBackendsView {
@@ -45,10 +46,22 @@ pub struct BackendEvent {
     pub timestamp: Instant,
 }
 
+#[derive(PartialEq, Clone)]
 pub struct LogEntry {
     pub key: String,
+    pub key_type: String,
     pub timestamp: Instant, // use the timestamp to know if it belongs to the current event
 }
+
+impl Eq for LogEntry {}
+
+#[derive(PartialEq, Clone, Hash)]
+pub struct DoneEntry {
+    pub key: String,
+    pub key_type: String,
+}
+
+impl Eq for DoneEntry {}
 
 // Periodically syncs backends
 pub struct KeeperServer {
@@ -154,14 +167,14 @@ impl KeeperServer {
         statuses[this] = true;
 
         let keeper_server = KeeperServer {
-            http_back_addrs: http_back_addrs,
-            storage_clients: storage_clients,
-            keeper_addrs: keeper_addrs,
+            http_back_addrs,
+            storage_clients,
+            keeper_addrs,
             this: kc.this,
             id: kc.id,
             ready_sender_opt: Arc::new(Mutex::new(kc.ready)),
             shutdown_receiver_opt: Arc::new(Mutex::new(kc.shutdown)),
-            should_shutdown: should_shutdown,
+            should_shutdown,
             saved_tasks_spawned_handles: Arc::new(Mutex::new(vec![])),
             live_backends_view: Arc::new(RwLock::new(LiveBackendsView {
                 monitoring_range_inclusive: None,
@@ -185,7 +198,6 @@ impl KeeperServer {
             initializing: Arc::new(RwLock::new(true)),
             keeper_client_opts: Arc::new(Mutex::new(keeper_client_opts)),
         };
-
         Ok(keeper_server)
     }
 
@@ -361,7 +373,7 @@ impl KeeperServer {
                         if !prev_live_set.contains(&back_idx) {
                             event_detected = Some(BackendEvent {
                                 event_type: BackendEventType::Join,
-                                back_idx: back_idx,
+                                back_idx,
                                 timestamp: Instant::now(),
                             });
                             break;
@@ -381,7 +393,7 @@ impl KeeperServer {
                         if !cur_live_set.contains(&back_idx) {
                             event_detected = Some(BackendEvent {
                                 event_type: BackendEventType::Leave,
-                                back_idx: back_idx,
+                                back_idx,
                                 timestamp: Instant::now(),
                             });
                             break;
@@ -877,6 +889,7 @@ impl KeeperServer {
             ()
         });
 
+        let storage_clients_clone = storage_clients.clone();
         let keeper_addrs_clone = keeper_addrs.clone();
         let http_back_addrs_clone = http_back_addrs.clone();
         let this_clone = this.clone();
@@ -887,6 +900,9 @@ impl KeeperServer {
         let end_positions_clone = end_positions.clone();
         let keeper_client_opts_clone = keeper_client_opts.clone();
         let statuses_clone = statuses.clone();
+        let predecessor_event_detected_clone = predecessor_event_detected.clone();
+        let log_entries_clone = log_entries.clone();
+
         let handle2 = tokio::spawn(async move {
             let res = Self::monitor(
                 keeper_addrs_clone,
@@ -898,12 +914,14 @@ impl KeeperServer {
                 end_positions_clone,
                 keeper_client_opts_clone,
                 statuses_clone,
+                predecessor_event_detected_clone,
+                storage_clients_clone,
+                log_entries_clone,
             )
             .await;
             if let Err(e) = res {
                 println!("Error monitor: {}", e);
             }
-
             ()
         });
 
@@ -1073,6 +1091,7 @@ impl KeeperServer {
         keeper_addrs: Vec<String>,
         idx: usize,
         key: String,
+        key_type: String,
     ) -> TribResult<bool> {
         Self::connect(Arc::clone(&keeper_client_opts), keeper_addrs, idx).await?;
         let keeper_client_opts = Arc::clone(&keeper_client_opts).lock_owned().await;
@@ -1085,7 +1104,7 @@ impl KeeperServer {
             None => return Err("Client was somehow not connected / be initialized!".into()),
         };
         drop(keeper_client_opts); // client_opt needs the lock
-        client.send_key(Key { key }).await?;
+        client.send_key(Key { key, key_type }).await?;
         Ok(true)
     }
 
@@ -1180,14 +1199,14 @@ impl KeeperServer {
         live_backends_view_arc: Arc<RwLock<LiveBackendsView>>,
         storage_clients: Vec<Arc<StorageClient>>,
     ) -> TribResult<bool> {
-        let addr_num = keeper_addrs.len();
+        let keeper_num = keeper_addrs.len();
         let mut normal_join = false; // if this is a normal join operation
         let start_time = Instant::now();
         let mut current_time = Instant::now();
 
         // detect other keepers for 5 seconds
         while current_time.duration_since(start_time) < Duration::new(5, 0) {
-            for idx in 0..addr_num {
+            for idx in 0..keeper_num {
                 // only contact other keepers
                 if idx == this {
                     continue;
@@ -1249,13 +1268,13 @@ impl KeeperServer {
             )
             .await?;
         }
-
         tokio::time::sleep(Duration::from_secs(4)).await; // sleep after the first scan
+
         if normal_join {
             // find the successor
             let statuses = statuses.read().await;
             let mut successor_index = this;
-            for idx in this + 1..addr_num {
+            for idx in this + 1..keeper_num {
                 if statuses[idx] {
                     successor_index = idx;
                     break;
@@ -1329,6 +1348,9 @@ impl KeeperServer {
         end_positions: Arc<RwLock<Vec<u64>>>,
         keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>,
         statuses: Arc<RwLock<Vec<bool>>>,
+        predecessor_event_detected: Arc<RwLock<Option<BackendEvent>>>,
+        clients_for_scanning: Vec<Arc<StorageClient>>, // all backends,
+        log_entries: Arc<RwLock<Vec<LogEntry>>>, // store the keys of finsihed lists to help migration
     ) -> TribResult<bool> {
         let keeper_num = keeper_addrs.len();
         loop {
@@ -1386,6 +1408,13 @@ impl KeeperServer {
                             Some(predecessor_index) => {
                                 if predecessor_index == idx {
                                     // call the take over function
+
+                                    Self::take_over_pred_event_handling_if_needed(
+                                        predecessor_event_detected.clone(),
+                                        clients_for_scanning.clone(),
+                                        log_entries.clone(),
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -1405,6 +1434,57 @@ impl KeeperServer {
             .await; // update the range
             tokio::time::sleep(Duration::from_secs(1)).await; // sleep for 1 second
         }
+    }
+
+    async fn take_over_pred_event_handling_if_needed(
+        predecessor_event_detected: Arc<RwLock<Option<BackendEvent>>>,
+        clients_for_scanning: Vec<Arc<StorageClient>>, // all backend's clients
+        log_entries: Arc<RwLock<Vec<LogEntry>>>,
+    ) -> TribResult<()> {
+        let pred_event_lock = predecessor_event_detected.write().await;
+        let pred_event = pred_event_lock.clone();
+        drop(pred_event_lock);
+
+        // If no pred event or not a recent event, return
+        match pred_event {
+            None => return Ok(()),
+            Some(back_ev) => {
+                if Instant::now().saturating_duration_since(back_ev.timestamp)
+                    >= Duration::from_secs(20)
+                {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Clone clients since later moving into async for tokio spawn async execution.
+        let clients_for_scanning_clones = clients_for_scanning.clone();
+
+        // Scan range range
+        let all_backends_range = (0, clients_for_scanning.len() - 1);
+        let (all_live_back_indices, _) =
+            Self::single_scan_and_sync(clients_for_scanning_clones, all_backends_range, 0).await?;
+
+        let mut done_keys: HashSet<DoneEntry> = HashSet::new();
+
+        let now = Instant::now();
+        // Extract recent entries
+        let mut logs_done_lock = log_entries.write().await;
+        for log_entry in (*logs_done_lock).iter() {
+            if now.saturating_duration_since(log_entry.timestamp) < Duration::from_secs(20) {
+                done_keys.insert(DoneEntry {
+                    key: log_entry.key.clone(),
+                    key_type: log_entry.key_type.clone(),
+                });
+            }
+        }
+        // Reset to empty vec
+        *logs_done_lock = vec![];
+
+        drop(logs_done_lock);
+        // TODO Call migration
+
+        Ok(())
     }
 }
 
@@ -1503,10 +1583,11 @@ impl keeper::keeper_rpc_server::KeeperRpc for KeeperServer {
         request: tonic::Request<Key>,
     ) -> Result<tonic::Response<Bool>, tonic::Status> {
         // record the log entry to avoid repetitive migration
-        let received_key = request.into_inner().key;
+        let received_key = request.into_inner();
         let mut log_entries = self.log_entries.write().await;
         log_entries.push(LogEntry {
-            key: received_key,
+            key: received_key.key,
+            key_type: received_key.key_type,
             timestamp: Instant::now(),
         });
 
