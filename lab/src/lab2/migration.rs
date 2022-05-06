@@ -1,7 +1,9 @@
-use super::keeper_server::{BackendEvent, BackendEventType};
+use super::keeper_server::{
+    BackendEvent, BackendEventType, DoneEntry, LIST_KEY_TYPE_STR, REGULARY_KEY_TYPE_STR,
+};
 use crate::lab1::client::StorageClient;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -93,7 +95,7 @@ async fn migration_join(
     live_https: Vec<usize>,
     storage_clients: Vec<Arc<StorageClient>>,
     // <bin, vector of migrated keys> -> prevent redundant operations
-    migration_log: HashMap<String, Vec<String>>,
+    migration_log: Option<HashSet<DoneEntry>>,
 ) -> TribResult<bool> {
     let live_https_len = live_https.len();
 
@@ -118,7 +120,7 @@ async fn migration_join(
                 &bin,
                 Arc::clone(&storage_clients[succ]),
                 Arc::clone(&storage_clients[new]),
-                Vec::<String>::new(),
+                migration_log.clone(),
             )
             .await
             {
@@ -142,7 +144,7 @@ async fn migration_join(
             bin,
             Arc::clone(&storage_clients[succ]),
             Arc::clone(&storage_clients[new]),
-            Vec::<String>::new(),
+            migration_log.clone(),
         )
         .await
         {
@@ -176,7 +178,7 @@ async fn migration_crash(
     live_https: Vec<usize>,
     storage_clients: Vec<Arc<StorageClient>>,
     // <bin, vector of migrated keys> -> prevent redundant operations
-    migration_log: HashMap<String, Vec<String>>,
+    migration_log: Option<HashSet<DoneEntry>>,
 ) -> TribResult<bool> {
     let live_https_len = live_https.len();
     let succ_idx_in_live_https = lower_bound_in_list(&live_https, crashed);
@@ -209,7 +211,7 @@ async fn migration_crash(
                 bin,
                 storage_clients[pred].clone(),
                 storage_clients[succ].clone(),
-                Vec::<String>::new(),
+                migration_log.clone(),
             )
             .await
             {
@@ -227,7 +229,7 @@ async fn migration_crash(
                 bin,
                 storage_clients[succ].clone(),
                 storage_clients[next_succ].clone(),
-                Vec::<String>::new(),
+                migration_log.clone(),
             )
             .await
             {
@@ -245,12 +247,9 @@ async fn bin_migration(
     from: Arc<StorageClient>,
     to: Arc<StorageClient>,
     // <vector of migrated keys> -> prevent redundant operations
-    migration_log: Vec<String>,
+    migration_log: Option<HashSet<DoneEntry>>,
 ) -> TribResult<bool> {
     // Copying KeyValue pair
-
-    // How keeper record this part? It seems okay to redo all set operation
-    // However, it seems not that efficient
     let keys = from
         .keys(&Pattern {
             prefix: bin_name.clone().to_string(),
@@ -259,8 +258,26 @@ async fn bin_migration(
         .await?
         .0;
 
+    let mut log = HashSet::<DoneEntry>::new();
+    match migration_log {
+        Some(mlog) => {
+            log = mlog;
+        }
+        None => (),
+    }
+
     // Get value from storage and append it to backend
     for key in keys.iter() {
+        // Skip the key that has been migrated before
+        let check_entry = DoneEntry {
+            key_type: REGULARY_KEY_TYPE_STR.to_string(),
+            key: format!("{}::{}", bin_name, key.to_string()),
+        };
+
+        if log.contains(&check_entry) {
+            continue;
+        }
+
         let value = match from.get(key).await {
             Ok(Some(val)) => val,
             Ok(None) => continue,
@@ -317,14 +334,16 @@ async fn bin_migration(
 
     let list_keys: Vec<String> = list_keys_hs.into_iter().collect();
 
-    let mut migration_log_into_iter = migration_log.into_iter();
-
     for key in list_keys.iter() {
         // Skip the key that has been migrated before
-        if !(migration_log_into_iter.find(|x| x == key) == None) {
+        let check_entry = DoneEntry {
+            key_type: LIST_KEY_TYPE_STR.to_string(),
+            key: format!("{}::{}", bin_name, key.to_string()),
+        };
+
+        if log.contains(&check_entry) {
             continue;
         }
-
         // Append both entries from prefix list and suffix list to the prefix list in the backend we're copying to
         let prefix_key = format!("{}{}", PREFIX, key);
 
@@ -373,7 +392,7 @@ pub async fn migration_event(
     back_event: &BackendEvent,
     live_https: Vec<usize>,
     storage_clients: Vec<Arc<StorageClient>>,
-    migration_log: HashMap<String, Vec<String>>,
+    migration_log: Option<HashSet<DoneEntry>>,
 ) -> TribResult<bool> {
     if back_event.event_type == BackendEventType::Join {
         return migration_join(
