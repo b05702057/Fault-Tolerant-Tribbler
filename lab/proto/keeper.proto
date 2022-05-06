@@ -14,6 +14,7 @@ message Clock {
 
 message Key {
     string key = 1;
+    string key_type = 2;
 }
 
 message Bool {
