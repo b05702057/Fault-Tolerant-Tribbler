@@ -1413,7 +1413,7 @@ impl KeeperServer {
                                 if predecessor_index == idx {
                                     // call the take over function
 
-                                    let successor_keeper_client: Option<KeeperRpcClient<tonic::transport::Channel>> = None;
+                                    let mut successor_keeper_client: Option<KeeperRpcClient<tonic::transport::Channel>> = None;
 
                                     let found_index = Self::find_successor_index(
                                         statuses.clone(),
@@ -1423,8 +1423,8 @@ impl KeeperServer {
                                     if found_index != this {
                                         let successor_index = found_index;
 
-                                        Self::connect(Arc::clone(&keeper_client_opts), keeper_addrs, idx).await?;
-                                        let keeper_client_opts = Arc::clone(&keeper_client_opts).lock().await;
+                                        Self::connect(Arc::clone(&keeper_client_opts), keeper_addrs.clone(), idx).await?;
+                                        let keeper_client_opts = Arc::clone(&keeper_client_opts).lock_owned().await;
                                         successor_keeper_client = match &keeper_client_opts[idx] {
                                             Some(keeper_client) => Some(keeper_client.clone()),
                                             None => None
