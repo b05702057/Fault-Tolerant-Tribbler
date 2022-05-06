@@ -95,7 +95,6 @@ impl BinClient {
         }
     }
 
-    // TODO
     async fn single_scan(
         live_back_indices_arc: Arc<RwLock<Vec<usize>>>,
         clients_for_scanning: Vec<Arc<StorageClient>>,

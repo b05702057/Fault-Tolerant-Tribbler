@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::Receiver, Mutex, RwLock};
-use tokio::time::sleep;
+
 use tonic::Response;
 use tribbler::{config::KeeperConfig, err::TribResult, storage::Storage};
 
@@ -17,6 +17,7 @@ use crate::{
 use async_trait::async_trait;
 use std::cmp;
 const KEEPER_SCAN_AND_SYNC_BACKEND_INTERVAL: Duration = Duration::from_secs(2);
+const KEEPER_WAIT_UPON_EVENT_DETECTION_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_BACKEND_NUM: u64 = 300;
 
 #[derive(Clone)]
@@ -85,10 +86,14 @@ pub struct KeeperServer {
     /// Range is assumed to be based on the backend list length.
     pub latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
 
+    /// Last predecessor backends view result from last scan for predecessor region
+    pub predecessor_live_backends_view: Arc<RwLock<LiveBackendsView>>,
     /// Latest range known to monitor / range to use for next scan
     /// Note it may be start_idx > end_idx in which case we need to wrap around
     /// Range is assumed to be based on the backend list length.
     pub predecessor_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+    /// To save detected event in the predecessor region in case predecessor fails
+    pub predecessor_event_detected: Arc<RwLock<Option<BackendEvent>>>,
 
     /// Last time we sent ack to predecessor who was requesting join intialization
     pub ack_to_predecessor_time: Arc<RwLock<Option<Instant>>>,
@@ -112,7 +117,10 @@ pub struct KeeperServer {
 }
 
 impl KeeperServer {
-    pub async fn new(kc: KeeperConfig) -> TribResult<KeeperServer> {
+    pub async fn new(
+        kc: KeeperConfig,
+        should_shutdown: Arc<RwLock<bool>>,
+    ) -> TribResult<KeeperServer> {
         let http_back_addrs = kc
             .backs
             .into_iter()
@@ -144,19 +152,6 @@ impl KeeperServer {
         }
         statuses[this] = true;
 
-        let detected_event_type = BackendEventType::None;
-        let detected_backend_event = BackendEvent {
-            event_type: detected_event_type,
-            back_idx: 0,
-            timestamp: Instant::now(),
-        };
-        let acked_event_type = BackendEventType::None;
-        let acked_backend_event = BackendEvent {
-            event_type: acked_event_type,
-            back_idx: 0,
-            timestamp: Instant::now(),
-        };
-
         let keeper_server = KeeperServer {
             http_back_addrs,
             storage_clients,
@@ -165,22 +160,27 @@ impl KeeperServer {
             id: kc.id,
             ready_sender_opt: Arc::new(Mutex::new(kc.ready)),
             shutdown_receiver_opt: Arc::new(Mutex::new(kc.shutdown)),
-            should_shutdown: Arc::new(RwLock::new(false)),
+            should_shutdown,
             saved_tasks_spawned_handles: Arc::new(Mutex::new(vec![])),
             live_backends_view: Arc::new(RwLock::new(LiveBackendsView {
                 monitoring_range_inclusive: None,
                 live_backend_indices_in_range: vec![],
             })),
+            latest_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
+            predecessor_live_backends_view: Arc::new(RwLock::new(LiveBackendsView {
+                monitoring_range_inclusive: None,
+                live_backend_indices_in_range: vec![],
+            })),
+            predecessor_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
+            predecessor_event_detected: Arc::new(RwLock::new(None)),
+            ack_to_predecessor_time: Arc::new(RwLock::new(None)),
+            event_acked_by_successor: Arc::new(RwLock::new(None)),
+            event_detected_by_this: Arc::new(RwLock::new(None)),
+            event_handling_mutex: Arc::new(Mutex::new(0)),
             statuses: Arc::new(RwLock::new(statuses)),
             end_positions: Arc::new(RwLock::new(end_positions)),
             keeper_clock: Arc::new(RwLock::new(0)),
             log_entries: Arc::new(RwLock::new(Vec::<LogEntry>::new())),
-            event_detected_by_this: Arc::new(RwLock::new(Some(detected_backend_event))),
-            event_acked_by_successor: Arc::new(RwLock::new(Some(acked_backend_event))),
-            latest_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
-            predecessor_monitoring_range_inclusive: Arc::new(RwLock::new(None)),
-            ack_to_predecessor_time: Arc::new(RwLock::new(Some(Instant::now()))),
-            event_handling_mutex: Arc::new(Mutex::new(0)),
             initializing: Arc::new(RwLock::new(true)),
             keeper_client_opts: Arc::new(Mutex::new(keeper_client_opts)),
         };
@@ -205,6 +205,7 @@ impl KeeperServer {
             < Duration::from_secs(20);
     }
 
+    // For our range
     async fn periodic_scan_and_sync_backend(
         live_backends_view_arc: Arc<RwLock<LiveBackendsView>>,
         clients_for_scanning: Vec<Arc<StorageClient>>, // all backend's clients
@@ -256,7 +257,7 @@ impl KeeperServer {
                     cur_live_back_indices.len()
                 );
 
-                // TODO update clock reference of keeper
+                // Update clock reference of keeper
                 let mut k_clock = keeper_clock.write().await;
                 *k_clock = global_max_clock;
                 drop(k_clock);
@@ -271,6 +272,8 @@ impl KeeperServer {
                 *live_backends_view_lock = new_live_backends_view; // update view
                 drop(live_backends_view_lock);
 
+                // Now is logic to detect any event
+
                 // If range of previous view and current view is different, only compare the
                 // view portion that are overlapping
                 // Later extract the relevant range of view to compare for event detection if needed
@@ -279,8 +282,7 @@ impl KeeperServer {
 
                 let prev_monitor_range = prev_live_backends_view.monitoring_range_inclusive.clone();
 
-                // Get overlapping range and filter out indices in  prev_live_indices_in_overlapping_range and
-                // cur_live_indices_in_overlapping_range that are not in the overlapping range
+                // Get overlapping range and filter out indices in vectors to compare that are not in the overlapping range
                 if prev_monitor_range != range_to_scan_opt {
                     // Set of backend indices that were in the previous view range
                     let mut prev_range_set: HashSet<usize> = HashSet::new();
@@ -469,8 +471,33 @@ impl KeeperServer {
                     // This logic can be blocking since, no need to scan if this is in progress, since no new backend
                     // events will happen during that period
                     if should_handle_event {
-                        // Start scan first of all range
-                        // TODO wait 5 seconds and then migration etc.
+                        // Start scan first of all range (spawn)
+                        // Wait KEEPER_WAIT_UPON_EVENT_DETECTION_INTERVAL seconds and then do migration etc.
+
+                        // Firsto scanning ALL to have all live backends for easy migration/replication processing
+
+                        // Clone clients since later moving into async for tokio spawn async execution.
+                        let storage_clients_clones = clients_for_scanning.clone();
+
+                        let all_backends_range = (0, storage_clients_clones.len() - 1);
+
+                        // Spawn so can start wait timer immediately as the scan is running
+                        let scan_all_join_handle = tokio::spawn(async move {
+                            Self::single_scan_and_sync(
+                                storage_clients_clones,
+                                all_backends_range,
+                                global_max_clock,
+                            )
+                            .await
+                        });
+
+                        tokio::time::sleep(KEEPER_WAIT_UPON_EVENT_DETECTION_INTERVAL).await;
+
+                        // Note double chaining
+                        let (_all_live_back_indices, _) = scan_all_join_handle.await??;
+                        let _storage_clients_clones = clients_for_scanning.clone();
+
+                        // TODO call migration event passing in all_live_back_indices, event, and storage_clients_clones
                     }
                 }
             }
@@ -482,13 +509,195 @@ impl KeeperServer {
         Ok(())
     }
 
-    // // PSEUDOCODE TODO
-    // async fn replicate_data_from_A_to_B(clientA, clientB, backend_event) {
-    //     if backend_event is Join:
+    // For predecessor range
+    async fn predecessor_range_periodic_scan_backend(
+        predecessor_live_backends_view_arc: Arc<RwLock<LiveBackendsView>>,
+        clients_for_scanning: Vec<Arc<StorageClient>>, // all backend's clients
+        predecessor_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>, // expect to be predecessor_monitoring_range_inclusive
+        should_shutdown: Arc<RwLock<bool>>,
+        predecessor_event_detected: Arc<RwLock<Option<BackendEvent>>>,
+    ) -> TribResult<()> {
+        // To help monitor predecessor region
+        let mut global_max_clock = 0;
+        loop {
+            let should_shutdown_guard = should_shutdown.read().await;
 
-    //     else:
+            // First if should_shutdown is set to true (by async listen for shutdown function), can break.
+            if *should_shutdown_guard == true {
+                break;
+            } else {
+                drop(should_shutdown_guard);
+            }
 
-    // }
+            // Check for any events in predecessor region
+
+            let range_to_scan_lock = predecessor_monitoring_range_inclusive.read().await;
+            let range_to_scan_opt = *range_to_scan_lock;
+            drop(range_to_scan_lock);
+
+            // Only scan if there is a valid range to do so
+            if let Some(range_to_scan) = range_to_scan_opt {
+                // Clone clients since later moving into async for tokio spawn async execution.
+                let storage_clients_clones = clients_for_scanning.clone();
+
+                println!("[DEBUGGING] keeper_server's predecessor scan: Before syncing clock(global_max_clock = {}) on backends", global_max_clock);
+
+                let (cur_live_back_indices, clock_max_res) = Self::single_scan_and_sync(
+                    storage_clients_clones,
+                    range_to_scan,
+                    global_max_clock,
+                )
+                .await?;
+
+                global_max_clock = clock_max_res;
+
+                // Get previous live view as well as update it to the new live view
+                let new_live_backends_view = LiveBackendsView {
+                    monitoring_range_inclusive: Some(range_to_scan),
+                    live_backend_indices_in_range: cur_live_back_indices.clone(),
+                };
+                let mut predecessor_live_backends_view_lock =
+                    predecessor_live_backends_view_arc.write().await;
+                let prev_predecessor_live_backends_view =
+                    (*predecessor_live_backends_view_lock).clone(); // save prev view for event detection
+                *predecessor_live_backends_view_lock = new_live_backends_view; // update view
+                drop(predecessor_live_backends_view_lock);
+
+                // Now is logic to detect any event
+
+                // If range of previous view and current view is different, only compare the
+                // view portion that are overlapping
+                // Later extract the relevant range of view to compare for event detection if needed
+                let mut prev_live_indices_in_overlapping_range: Vec<usize> = vec![];
+                let mut cur_live_indices_in_overlapping_range: Vec<usize> = vec![];
+
+                let prev_monitor_range = prev_predecessor_live_backends_view
+                    .monitoring_range_inclusive
+                    .clone();
+
+                // Get overlapping range and filter out indices in vectors to compare that are not in the overlapping range
+                if prev_monitor_range != range_to_scan_opt {
+                    // Set of backend indices that were in the previous view range
+                    let mut prev_range_set: HashSet<usize> = HashSet::new();
+                    match prev_monitor_range {
+                        Some((prev_range_start, prev_range_end)) => {
+                            let mut back_idx = prev_range_start;
+                            loop {
+                                prev_range_set.insert(back_idx);
+                                // Break once idx at end of range has been processed
+                                if back_idx == prev_range_end {
+                                    break;
+                                }
+                                back_idx = (back_idx + 1) % clients_for_scanning.len();
+                            }
+                        }
+                        None => (),
+                    }
+
+                    // Set of backend indices that are in the recently scanned view range
+                    let mut cur_range_set: HashSet<usize> = HashSet::new();
+                    let (cur_range_start, cur_range_end) = range_to_scan;
+                    let mut back_idx = cur_range_start;
+                    loop {
+                        cur_range_set.insert(back_idx);
+                        // Break once idx at end of range has been processed
+                        if back_idx == cur_range_end {
+                            break;
+                        }
+                        back_idx = (back_idx + 1) % clients_for_scanning.len();
+                    }
+
+                    // Extract prev view back indices in overlapping range
+                    for back_idx in prev_predecessor_live_backends_view
+                        .live_backend_indices_in_range
+                        .iter()
+                    {
+                        // Overlapping if in both set
+                        if prev_range_set.contains(back_idx) && cur_range_set.contains(back_idx) {
+                            prev_live_indices_in_overlapping_range.push(back_idx.clone());
+                        }
+                    }
+
+                    // Extract cur view back indices in overlapping range
+                    for back_idx in cur_live_back_indices.iter() {
+                        // Overlapping if in both set
+                        if prev_range_set.contains(back_idx) && cur_range_set.contains(back_idx) {
+                            cur_live_indices_in_overlapping_range.push(back_idx.clone());
+                        }
+                    }
+
+                    // TODO update prev_live_indices_in_overlapping_range and prev_live_indices_in_overlapping_range
+                    // to only have entries of back_idx in the appropriate ranges
+                } else {
+                    // Else since the ranges are the same, overlapping range is the same, so no need to do any filter
+                    prev_live_indices_in_overlapping_range =
+                        prev_predecessor_live_backends_view.live_backend_indices_in_range;
+                    cur_live_indices_in_overlapping_range = cur_live_back_indices;
+                }
+
+                // Compare cur and prev overlapping views to detect any events
+
+                let mut event_detected: Option<BackendEvent> = None;
+                // View can only change by 1 addition or 1 removal of server.
+                // Since both crash and leave cannot happen within 30 seconds, if length the same,
+                // means that no events occured
+                if cur_live_indices_in_overlapping_range.len()
+                    > prev_live_indices_in_overlapping_range.len()
+                {
+                    // Join event case
+
+                    // Make hash set of prev.
+                    let prev_live_set: HashSet<usize> =
+                        prev_live_indices_in_overlapping_range.into_iter().collect();
+                    // Check which entry of curr is not in prev hash set
+                    for back_idx in cur_live_indices_in_overlapping_range {
+                        // If not in prev hash set, then that is the newly joined backend
+                        if !prev_live_set.contains(&back_idx) {
+                            event_detected = Some(BackendEvent {
+                                event_type: BackendEventType::Join,
+                                back_idx: back_idx,
+                                timestamp: Instant::now(),
+                            });
+                            break;
+                        }
+                    }
+                } else if cur_live_indices_in_overlapping_range.len()
+                    < prev_live_indices_in_overlapping_range.len()
+                {
+                    // Crash event case
+
+                    // Make hash set of cur.
+                    let cur_live_set: HashSet<usize> =
+                        cur_live_indices_in_overlapping_range.into_iter().collect();
+                    // Check which entry of prev is not in cur hash set
+                    for back_idx in prev_live_indices_in_overlapping_range {
+                        // If not in cur hash set, then that is the crashed backend
+                        if !cur_live_set.contains(&back_idx) {
+                            event_detected = Some(BackendEvent {
+                                event_type: BackendEventType::Leave,
+                                back_idx: back_idx,
+                                timestamp: Instant::now(),
+                            });
+                            break;
+                        }
+                    }
+                }
+
+                // If detected an event for predecessor, save it in case predecessor dies
+                if let Some(event) = event_detected {
+                    let mut predecessor_event_detected_lock =
+                        predecessor_event_detected.write().await;
+                    *predecessor_event_detected_lock = Some(event);
+                    drop(predecessor_event_detected_lock);
+                }
+            }
+
+            // Wait interval til next scan
+            tokio::time::sleep(KEEPER_SCAN_AND_SYNC_BACKEND_INTERVAL).await;
+        }
+
+        Ok(())
+    }
 
     // Performs scan on clients in range and returns live_backend_indexes from that range as well as the max clock
     // Range_to_scan (start_idx, end_idx) may have start_idx > end_idx, in which case we wrap around
@@ -549,10 +758,11 @@ impl KeeperServer {
 
     // Range_to_scan (start_idx, end_idx) may have start_idx > end_idx, in which case we wrap around
     async fn first_scan_for_initialization(
-        &self,
+        live_backends_view_arc: Arc<RwLock<LiveBackendsView>>,
+        storage_clients: Vec<Arc<StorageClient>>,
         range_to_scan: (usize, usize),
     ) -> TribResult<Vec<usize>> {
-        let storage_clients_clones = self.storage_clients.clone();
+        let storage_clients_clones = storage_clients.clone();
         let (cur_live_back_indices, _) =
             Self::single_scan_and_sync(storage_clients_clones, range_to_scan, 0).await?;
 
@@ -562,57 +772,230 @@ impl KeeperServer {
         };
 
         // Update live backends view
-        let mut live_backends_view = self.live_backends_view.write().await;
+        let mut live_backends_view = live_backends_view_arc.write().await;
         *live_backends_view = new_live_backends_view;
         drop(live_backends_view);
 
         Ok(cur_live_back_indices)
     }
 
-    pub async fn serve(&mut self) -> TribResult<()> {
-        let ready_sender_opt = self.ready_sender_opt.lock().await;
+    pub async fn start_task(
+        http_back_addrs: Vec<String>,
+        storage_clients: Vec<Arc<StorageClient>>,
+        keeper_addrs: Vec<String>,
+        this: usize,
+        ready_sender_opt: Arc<Mutex<Option<Sender<bool>>>>,
+        should_shutdown: Arc<RwLock<bool>>,
+        live_backends_view: Arc<RwLock<LiveBackendsView>>,
+        latest_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+        predecessor_live_backends_view: Arc<RwLock<LiveBackendsView>>,
+        predecessor_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
+        predecessor_event_detected: Arc<RwLock<Option<BackendEvent>>>,
+        ack_to_predecessor_time: Arc<RwLock<Option<Instant>>>,
+        event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
+        event_detected_by_this: Arc<RwLock<Option<BackendEvent>>>,
+        event_handling_mutex: Arc<Mutex<u64>>,
+        statuses: Arc<RwLock<Vec<bool>>>,
+        end_positions: Arc<RwLock<Vec<u64>>>, // keeper end positions on the ring
+        keeper_clock: Arc<RwLock<u64>>,       // keeper_clock of this keeper
+        log_entries: Arc<RwLock<Vec<LogEntry>>>, // store the keys of finsihed lists to help migration
+        initializing: Arc<RwLock<bool>>,         // if this keeper is initializing
+        keeper_client_opts: Arc<Mutex<Vec<Option<KeeperRpcClient<tonic::transport::Channel>>>>>, // keeper connections
+        join_handles_to_abort: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    ) -> TribResult<()> {
+        Self::initialization(
+            keeper_client_opts.clone(),
+            keeper_addrs.clone(),
+            keeper_clock.clone(),
+            statuses.clone(),
+            http_back_addrs.clone(),
+            end_positions.clone(),
+            this.clone(),
+            latest_monitoring_range_inclusive.clone(),
+            predecessor_monitoring_range_inclusive.clone(),
+            event_acked_by_successor.clone(),
+            initializing.clone(),
+            live_backends_view.clone(),
+            storage_clients.clone(),
+        )
+        .await?;
+
+        // Send ready signal
+        let ready_sender_opt = ready_sender_opt.lock().await;
         // Send ready
         if let Some(ready_sender) = &*ready_sender_opt {
             ready_sender.send(true)?;
         }
         drop(ready_sender_opt);
 
-        // Sync backends every 1 second
-        const KEEPER_BACKEND_SYNC_INTERVAL: Duration = Duration::from_millis(1000);
+        // TESTING
+        let range = latest_monitoring_range_inclusive.write().await;
+        println!("Our range is: {:?}", range);
+        drop(range);
 
-        // let periodic_scan_and_sync_handle = tokio::spawn(async move {
-        //     Self::periodic_scan(
-        //         http_back_addrs,
-        //         live_http_back_addrs_arc,
-        //         clients_for_scanning,
-        //     )
-        //     .await;
-        //     ()
-        // });
+        let live_backends_view_clone = live_backends_view.clone();
+        let storage_clients_clone = storage_clients.clone();
+        let latest_monitoring_range_inclusive_clone = latest_monitoring_range_inclusive.clone();
+        let should_shutdown_clone = should_shutdown.clone();
+        let keeper_clock_clone = keeper_clock.clone();
+        let ack_to_predecessor_time_clone = ack_to_predecessor_time.clone();
+        let event_acked_by_successor_clone = event_acked_by_successor.clone();
+        let event_detected_by_this_clone = event_detected_by_this.clone();
+        let event_handling_mutex_clone = event_handling_mutex.clone();
+        let handle1 = tokio::spawn(async move {
+            let res = Self::periodic_scan_and_sync_backend(
+                live_backends_view_clone,
+                storage_clients_clone,
+                latest_monitoring_range_inclusive_clone,
+                should_shutdown_clone,
+                keeper_clock_clone,
+                ack_to_predecessor_time_clone,
+                event_acked_by_successor_clone,
+                event_detected_by_this_clone,
+                event_handling_mutex_clone,
+            )
+            .await;
+            if let Err(e) = res {
+                println!("Error periodic scan: {}", e);
+            }
+            ()
+        });
+
+        let keeper_addrs_clone = keeper_addrs.clone();
+        let http_back_addrs_clone = http_back_addrs.clone();
+        let this_clone = this.clone();
+        let keeper_clock_clone = keeper_clock.clone();
+        let latest_monitoring_range_inclusive_clone = latest_monitoring_range_inclusive.clone();
+        let predecessor_monitoring_range_inclusive_clone =
+            predecessor_monitoring_range_inclusive.clone();
+        let end_positions_clone = end_positions.clone();
+        let keeper_client_opts_clone = keeper_client_opts.clone();
+        let statuses_clone = statuses.clone();
+        let handle2 = tokio::spawn(async move {
+            let res = Self::monitor(
+                keeper_addrs_clone,
+                http_back_addrs_clone,
+                this_clone,
+                keeper_clock_clone,
+                latest_monitoring_range_inclusive_clone,
+                predecessor_monitoring_range_inclusive_clone,
+                end_positions_clone,
+                keeper_client_opts_clone,
+                statuses_clone,
+            )
+            .await;
+            if let Err(e) = res {
+                println!("Error monitor: {}", e);
+            }
+            ()
+        });
+
+        let handle3 = tokio::spawn(async move {
+            let res = Self::predecessor_range_periodic_scan_backend(
+                predecessor_live_backends_view,
+                storage_clients,
+                predecessor_monitoring_range_inclusive,
+                should_shutdown,
+                predecessor_event_detected,
+            )
+            .await;
+
+            if let Err(e) = res {
+                println!("Error predecessor scan: {}", e);
+            }
+            ()
+        });
+
+        let mut join_handles_to_abort_lock = join_handles_to_abort.lock().await;
+        (*join_handles_to_abort_lock).push(handle1);
+        (*join_handles_to_abort_lock).push(handle2);
+        (*join_handles_to_abort_lock).push(handle3);
+        drop(join_handles_to_abort_lock);
+        Ok(())
+    }
+
+    pub fn start(
+        &self,
+        join_handles_to_abort: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    ) -> TribResult<()> {
+        let http_back_addrs_clone = self.http_back_addrs.clone();
+        let storage_clients_clone = self.storage_clients.clone();
+        let keeper_addrs_clone = self.keeper_addrs.clone();
+        let this_clone = self.this.clone();
+        let ready_sender_opt_clone = self.ready_sender_opt.clone();
+        let should_shutdown_clone = self.should_shutdown.clone();
+        let live_backends_view_clone = self.live_backends_view.clone();
+        let latest_monitoring_range_inclusive_clone =
+            self.latest_monitoring_range_inclusive.clone();
+        let predecessor_live_backends_clone = self.predecessor_live_backends_view.clone();
+        let predecessor_monitoring_range_inclusive_clone =
+            self.predecessor_monitoring_range_inclusive.clone();
+        let predecessor_event_detected_clone = self.predecessor_event_detected.clone();
+        let ack_to_predecessor_time_clone = self.ack_to_predecessor_time.clone();
+        let event_acked_by_successor_clone = self.event_acked_by_successor.clone();
+        let event_detected_by_this_clone = self.event_detected_by_this.clone();
+        let event_handling_mutex_clone = self.event_handling_mutex.clone();
+        let statuses_clone = self.statuses.clone();
+        let end_positions_clone = self.end_positions.clone();
+        let keeper_clock_clone = self.keeper_clock.clone();
+        let log_entries_clone = self.log_entries.clone();
+        let initializing_clone = self.initializing.clone();
+        let keeper_client_opts_clone = self.keeper_client_opts.clone();
+
+        let join_handles_to_abort_clone = join_handles_to_abort.clone();
+
+        tokio::spawn(async move {
+            Self::start_task(
+                http_back_addrs_clone,
+                storage_clients_clone,
+                keeper_addrs_clone,
+                this_clone,
+                ready_sender_opt_clone,
+                should_shutdown_clone,
+                live_backends_view_clone,
+                latest_monitoring_range_inclusive_clone,
+                predecessor_live_backends_clone,
+                predecessor_monitoring_range_inclusive_clone,
+                predecessor_event_detected_clone,
+                ack_to_predecessor_time_clone,
+                event_acked_by_successor_clone,
+                event_detected_by_this_clone,
+                event_handling_mutex_clone,
+                statuses_clone,
+                end_positions_clone,
+                keeper_clock_clone,
+                log_entries_clone,
+                initializing_clone,
+                keeper_client_opts_clone,
+                join_handles_to_abort_clone,
+            )
+            .await
+        });
+
+        // Pseudocode steps
+        // server start(handles_to_abort_on_shutdown: Arc<Vec<JoinHandle>>):
+        //     spawn initialization , remember first scan in there
+        //     intiialization will send ready signal and call monitor and spawn periodic_scan at end
+        //     push join handles into handles_to_abort_on_shutdown
+        //     return
+
+        // in_outer_serve_keeper:
+        //     create server object
+        //     extract kc.config.http_addr [this] and make to_socket_addr to get address to server later
+        //     handles_to_abort_on_shutdown = Arc::new(vec![])
+        //     call start().await
+        //     wrap server object
+        //     serve_with_shutdown with shutdown future aborting join_handles_to_abort
+
         // // TODO Push to tasks_spawned_handles
         // // Maybe not needed for this function since shutdown guard is checked in there.
         // let saved_tasks_spawned_handles_lock = self.saved_tasks_spawned_handles.lock().await;
         // (*saved_tasks_spawned_handles_lock).push(periodic_scan_and_sync_handle);
 
-        // Block on the shutdown signal if exists
-        let mut shutdown_receiver_opt = self.shutdown_receiver_opt.lock().await;
-        if let Some(mut shutdown_receiver) = (*shutdown_receiver_opt).take() {
-            shutdown_receiver.recv().await;
-            // Gracefully close
-            shutdown_receiver.close();
-
-            // Indicate shut down is requested so that other async tasks would shutdown
-            let mut should_shutdown_guard = self.should_shutdown.write().await;
-            *should_shutdown_guard = true;
-        } else {
-            // Else block indefinitely by awaiting on the pending future
-            let future = core::future::pending();
-            let res: i32 = future.await;
-        }
-        drop(shutdown_receiver_opt);
-
         Ok(())
     }
+
+    //----------------- "Client" code---------------
 
     // connect client if not already connected
     pub async fn connect(
@@ -723,15 +1106,7 @@ impl KeeperServer {
         let alive_num = alive_vector.len();
         if alive_num == 1 {
             *predecessor_monitoring_range_inclusive = None;
-            let end_position = end_positions[this];
-            let start_position = (end_position + 1) % MAX_BACKEND_NUM;
-            if start_position >= back_num as u64 && end_position >= back_num as u64 {
-                *latest_monitoring_range_inclusive = None;
-            } else if start_position >= back_num as u64 {
-                *latest_monitoring_range_inclusive = Some((0, end_position as usize));
-            } else if end_position >= back_num as u64 {
-                *latest_monitoring_range_inclusive = Some((start_position as usize, back_num - 1));
-            }
+            *latest_monitoring_range_inclusive = Some((0, back_num - 1 as usize));
         } else {
             for idx in 0..alive_num {
                 if alive_vector[idx] == end_positions[this] {
@@ -739,8 +1114,11 @@ impl KeeperServer {
                     let pre_start_idx = ((idx - 2) + alive_num) % alive_num;
                     let start_position = (alive_vector[start_idx] + 1) % MAX_BACKEND_NUM;
                     let end_position = end_positions[this];
-                    if start_position >= back_num as u64 && end_position >= back_num as u64 {
-                        *latest_monitoring_range_inclusive = None
+                    if start_position >= back_num as u64
+                        && end_position >= back_num as u64
+                        && start_position <= end_position
+                    {
+                        *latest_monitoring_range_inclusive = None;
                     } else if start_position >= back_num as u64 {
                         *latest_monitoring_range_inclusive = Some((0, end_position as usize));
                     } else if end_position >= back_num as u64 {
@@ -750,7 +1128,9 @@ impl KeeperServer {
 
                     let pre_start_position = (alive_vector[pre_start_idx] + 1) % MAX_BACKEND_NUM;
                     let pre_end_position = start_position - 1;
-                    if pre_start_position >= back_num as u64 && pre_end_position >= back_num as u64
+                    if pre_start_position >= back_num as u64
+                        && pre_end_position >= back_num as u64
+                        && start_position <= end_position
                     {
                         *predecessor_monitoring_range_inclusive = None
                     } else if pre_start_position >= back_num as u64 {
@@ -780,15 +1160,17 @@ impl KeeperServer {
         predecessor_monitoring_range_inclusive: Arc<RwLock<Option<(usize, usize)>>>,
         event_acked_by_successor: Arc<RwLock<Option<BackendEvent>>>,
         initializing: Arc<RwLock<bool>>,
+        live_backends_view_arc: Arc<RwLock<LiveBackendsView>>,
+        storage_clients: Vec<Arc<StorageClient>>,
     ) -> TribResult<bool> {
-        let addr_num = keeper_addrs.len();
+        let keeper_num = keeper_addrs.len();
         let mut normal_join = false; // if this is a normal join operation
         let start_time = Instant::now();
         let mut current_time = Instant::now();
 
         // detect other keepers for 5 seconds
         while current_time.duration_since(start_time) < Duration::new(5, 0) {
-            for idx in 0..addr_num {
+            for idx in 0..keeper_num {
                 // only contact other keepers
                 if idx == this {
                     continue;
@@ -833,19 +1215,30 @@ impl KeeperServer {
             http_back_addrs,
             end_positions,
             Arc::clone(&statuses),
-            latest_monitoring_range_inclusive,
+            latest_monitoring_range_inclusive.clone(),
             predecessor_monitoring_range_inclusive,
         )
         .await;
 
-        // scan the backends and sleep for a specific amount of time
-        // todo!(); TODO
-        tokio::time::sleep(Duration::from_secs(4)); // sleep after the first scan
+        // Do first scan (if range is not None)
+        let latest_monitoring_range_inclusive_lock = latest_monitoring_range_inclusive.read().await;
+        let latest_range = latest_monitoring_range_inclusive_lock.clone();
+        drop(latest_monitoring_range_inclusive_lock);
+        if let Some(range_to_scan) = latest_range {
+            let _ = Self::first_scan_for_initialization(
+                live_backends_view_arc,
+                storage_clients,
+                range_to_scan,
+            )
+            .await?;
+        }
+        tokio::time::sleep(Duration::from_secs(4)).await; // sleep after the first scan
+
         if normal_join {
             // find the successor
             let statuses = statuses.read().await;
             let mut successor_index = this;
-            for idx in this + 1..addr_num {
+            for idx in this + 1..keeper_num {
                 if statuses[idx] {
                     successor_index = idx;
                     break;
@@ -993,9 +1386,8 @@ impl KeeperServer {
                 Arc::clone(&predecessor_monitoring_range_inclusive),
             )
             .await; // update the range
-            sleep(Duration::from_secs(1)).await; // sleep for 1 second
+            tokio::time::sleep(Duration::from_secs(1)).await; // sleep for 1 second
         }
-        Ok(true)
     }
 }
 
