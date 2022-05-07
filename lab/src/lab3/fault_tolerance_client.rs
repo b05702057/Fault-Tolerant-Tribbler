@@ -15,6 +15,7 @@ use tribbler::{
 const PREFIX: &str = "PREFIX_";
 const SUFFIX: &str = "SUFFIX_";
 
+#[derive(Debug)]
 pub struct ReplicateIndices {
     pub primary: usize,
     pub backup: Option<usize>,
@@ -100,6 +101,7 @@ impl StorageFaultToleranceClient {
         let primary_hash = hasher.finish() % storage_clients_len as u64;
 
         live_https.sort();
+        //println!("Live https: {:?}", live_https);
 
         // Get lower_bound for primary backend and the next backend as backup
         let primary_idx = self.lower_bound_in_list(&live_https, primary_hash as usize);
@@ -522,11 +524,14 @@ impl KeyList for StorageFaultToleranceClient {
 
     /// Append a string to the list. return true when no error.
     async fn list_append(&self, kv: &KeyValue) -> TribResult<bool> {
+        //println!("List append {:?}", kv);
         let escaped_key = colon::escape(&kv.key);
         let translated_key = format!("{}::{}", self.bin_name, escaped_key);
         let typed_translated_key = format!("{}{}", SUFFIX, translated_key);
         // Fault tolerance
         let mut backend_indices = self.find_target_backends().await?;
+
+        //println!("backend_indices: {:?}", backend_indices);
 
         let primary_value: String;
         let mut translated_kv: KeyValue;
@@ -551,11 +556,6 @@ impl KeyList for StorageFaultToleranceClient {
         };
         let primary_list = self.get_processed_list(primary, &translated_key).await;
 
-        // println!(
-        //     "[DEBUGGING] list_append: for bin {} for keyvalue {:?}, original (could be swapped) primary idx is {}, backup idx is {:?}",
-        //     self.bin_name, kv, backend_indices.primary, backend_indices.backup
-        // );
-
         // cases:
         // 1. primary and backup and primary as primary
         // 2. primary and backup and backup as primary
@@ -564,47 +564,39 @@ impl KeyList for StorageFaultToleranceClient {
 
         // Deciding primary and backup
         match primary_list {
-            Ok(p_list) => {
-                match backup_list {
-                    Ok(f_list) => {
-                        // println!("[DEBUGGING] list_append: for bin {} both primary and backup are alive (returned result)", self.bin_name);
-                        // case 2
-                        if p_list.len() < f_list.len() {
-                            // println!("[DEBUGGING] list_append: for bin {} swapping primary idx and backup idx", self.bin_name);
-                            match backup {
-                                Some(ret) => {
-                                    // swap primary and backup
-                                    let tmp = primary;
-                                    primary = &ret;
-                                    backup = Some(tmp);
-                                    let tmp_idx = match backend_indices.backup {
-                                        Some(index) => index,
-                                        None => {
-                                            return Err(Box::new(TribblerError::Unknown(
-                                                "This should not happend. Missing backup index"
-                                                    .to_string(),
-                                            )));
-                                        }
-                                    };
-                                    backend_indices.backup = Some(backend_indices.primary);
-                                    backend_indices.primary = tmp_idx;
-                                }
-                                None => (),
+            Ok(p_list) => match backup_list {
+                Ok(f_list) => {
+                    // case 2
+                    if p_list.len() < f_list.len() {
+                        match backup {
+                            Some(ret) => {
+                                // swap primary and backup
+                                let tmp = primary;
+                                primary = &ret;
+                                backup = Some(tmp);
+                                let tmp_idx = match backend_indices.backup {
+                                    Some(index) => index,
+                                    None => {
+                                        return Err(Box::new(TribblerError::Unknown(
+                                            "This should not happend. Missing backup index"
+                                                .to_string(),
+                                        )));
+                                    }
+                                };
+                                backend_indices.backup = Some(backend_indices.primary);
+                                backend_indices.primary = tmp_idx;
                             }
+                            None => (),
                         }
                     }
-                    // case 3
-                    Err(_) => backup = None,
                 }
-            }
+                // case 3
+                Err(_) => backup = None,
+            },
             Err(_) => {
                 match backup_list {
                     // case 4
                     Ok(_) => {
-                        // println!(
-                        //     "[DEBUGGING] list_append: for bin {} only backup alive",
-                        //     self.bin_name
-                        // );
                         primary = match backup {
                             Some(storage) => storage,
                             None => {
@@ -660,6 +652,7 @@ impl KeyList for StorageFaultToleranceClient {
 
         match backup {
             Some(backup_storage) => {
+                //println!("Append to backup {:?}", backup_value);
                 translated_kv.value = backup_value;
                 _ = backup_storage.list_append(&translated_kv).await;
             }
@@ -742,64 +735,38 @@ impl KeyList for StorageFaultToleranceClient {
         let mut matched_keys: HashSet<String> = HashSet::new();
         let primary = &self.storage_clients[backend_indices.primary];
 
-        // println!(
-        //     "[DEBUGGING] list_keys for bin {} primary idx is {}, backup idx is {:?}",
-        //     self.bin_name, backend_indices.primary, backend_indices.backup
-        // );
-
         // Insert all the matching keys in primary and backups to hashset
         // then we don't need to do the comparison since one should be a subset of another or they are the same
         match primary.list_keys(&prefix_translated_pattern).await {
             Ok(List(keys)) => {
-                // println!(
-                //     "[DEBUGGING] list_keys for bin {} no error when list_keys on primary prefix list",
-                //     self.bin_name
-                // );
-
+                //println!("list_keys primary prefix_list len: {:?}", keys.len());
                 for k in keys.iter() {
-                    // println!(
-                    //     "[DEBUGGING] list_keys for bin {} got list key {} from primary prefix list",
-                    //     self.bin_name, &k
-                    // );
-
                     let key_split: Vec<&str> = k.split(PREFIX).collect();
                     matched_keys.insert(key_split[1].to_string());
                 }
             }
-            Err(e) => println!("Error listing primary keys: {}", e),
+            Err(_) => (),
         }
         match primary.list_keys(&suffix_translated_pattern).await {
             Ok(List(keys)) => {
-                // println!(
-                //     "[DEBUGGING] list_keys for bin {} no error when list_keys on primary suffix list",
-                //     self.bin_name
-                // );
+                //println!("list_keys primary suffix_list len: {:?}", keys.len());
                 for k in keys.iter() {
-                    println!(
-                        "[DEBUGGING] list_keys for bin {} got list key {} from primary suffix list",
-                        self.bin_name, &k
-                    );
                     let key_split: Vec<&str> = k.split(SUFFIX).collect();
                     matched_keys.insert(key_split[1].to_string());
                 }
             }
-            Err(e) => println!("Error listing backup keys: {}", e),
+            Err(_) => (),
         }
+
+        //println!("[DEBUGGING] Backend_indices: {:?}", backend_indices);
 
         match backend_indices.backup {
             Some(index) => {
                 let backup = &self.storage_clients[index];
                 match backup.list_keys(&prefix_translated_pattern).await {
                     Ok(List(keys)) => {
-                        // println!(
-                        //     "[DEBUGGING] list_keys for bin {} no error when list_keys on backup prefix list",
-                        //     self.bin_name
-                        // );
+                        //println!("list_keys backup prefix_list len: {:?}", keys.len());
                         for k in keys.iter() {
-                            println!(
-                                "[DEBUGGING] list_keys for bin {} got list key {} from backup prefix list",
-                                self.bin_name, &k
-                            );
                             let key_split: Vec<&str> = k.split(PREFIX).collect();
                             matched_keys.insert(key_split[1].to_string());
                         }
@@ -808,15 +775,8 @@ impl KeyList for StorageFaultToleranceClient {
                 }
                 match backup.list_keys(&suffix_translated_pattern).await {
                     Ok(List(keys)) => {
-                        // println!(
-                        //     "[DEBUGGING] list_keys for bin {} no error when list_keys on backup suffix list",
-                        //     self.bin_name
-                        // );
+                        //println!("list_keys backup suffix_list len: {:?}", keys.len());
                         for k in keys.iter() {
-                            println!(
-                                "[DEBUGGING] list_keys for bin {} got list key {} from primary suffix list",
-                                self.bin_name, &k
-                            );
                             let key_split: Vec<&str> = k.split(SUFFIX).collect();
                             matched_keys.insert(key_split[1].to_string());
                         }
@@ -841,6 +801,8 @@ impl KeyList for StorageFaultToleranceClient {
                 )
             })
             .collect();
+
+        //println!("prefix_stripped_keys: {:?}", prefix_stripped_keys);
         Ok(List(prefix_stripped_keys))
     }
 }
