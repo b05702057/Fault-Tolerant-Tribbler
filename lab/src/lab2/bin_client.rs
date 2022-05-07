@@ -76,10 +76,10 @@ impl BinClient {
         let mut now = std::time::Instant::now();
 
         loop {
-            println!(
-                "[DEBUGGING] bin_client's periodic_scan: LOOPING, time since last loop: {} ms",
-                now.elapsed().as_millis()
-            );
+            // println!(
+            //     "[DEBUGGING] bin_client's periodic_scan: LOOPING, time since last loop: {} ms",
+            //     now.elapsed().as_millis()
+            // );
             now = std::time::Instant::now();
 
             let clients_for_scanning_clones = clients_for_scanning.clone();
@@ -124,14 +124,14 @@ impl BinClient {
             }
         }
 
-        println!(
-            "[DEBUGGING] bin_client's scan: num_backends_possible.len(): {}",
-            num_backends_possible
-        );
-        println!(
-            "[DEBUGGING] bin_client's scan: live_addrs.len(): {}",
-            temp_live_back_indices.len()
-        );
+        // println!(
+        //     "[DEBUGGING] bin_client's scan: num_backends_possible.len(): {}",
+        //     num_backends_possible
+        // );
+        // println!(
+        //     "[DEBUGGING] bin_client's scan: live_addrs.len(): {}",
+        //     temp_live_back_indices.len()
+        // );
 
         let mut live_indices = live_back_indices_arc.write().await;
         *live_indices = temp_live_back_indices;
