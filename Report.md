@@ -1,64 +1,37 @@
 # Report
 
-## Overview
-As mentioned in the lab 2 writeup, the system consists of the BinStorage
-and Tribbler components. The design choices largely lie on the Tribbler side 
-in terms of how to use BinStorage, since the BinStorage component provides very
-specific (and restrictive) interfaces.
-
 ## Bin Storage
-The bin storage client is created by simply creating a bin client that can 
-return a new client StorageClientMapperWrapper struct, which essentially is
-a wrapper around lab1's client, for each bin() call. This wrapper client will 
-be created with the bin name and uses this to prefix key inputs before passing
-them to the appropriate lab1's client functions to provide logically separate 
-virtual key value stores for each bin name. This bin name prefix is escaped
-from any colons and the "::" separator is thus used to separate the bin name
-portion from the actual key when stored in the key value store. The backend
-that the client will connect to is chosen by hashing the bin name for load
-balancing.
+Besides the bin abstraction implemented in lab 2, fault tolerance is achieved by coordinating key translation
+between bin clients and keepers. An approach similar to CFS was used to help keepers and servers share similar 
+views of the live backends and thus could go to the appropriate ones for operations. These views are 
+periodically scanned and updated so that they will have the same view shortly enough upon an event. Then, it is simple
+for keepers and clients to agree on which bins should go where by simply applying a hash and choosing the 
+next 2 closest live backends.
 
-The keeper simply polls the backends using clock() every second and polls them
-again with the largest clock value seen across all backends to keep them 
-roughly synchronized. It also uses a lab1's client to make this clock RPC.
+Additionally, some properties of the lists appended to are guaranteed by making bin clients follow certain algorithms
+when appending or fetching from stores. For example, it would always write to 2 backends for each operation and use the 
+the notion of an "index" in the "total log" in one of them to have serialization order. This "total log" is the view 
+created by concatenating a "prefix log" and "suffix log", which is per key, per replica. In normal operation, there would be
+2 replicas for any key. Each "total log" in a replica can be "resolved" to the same state, and thus either is sufficient 
+for operations serving. This is achieved by encoding the index in the entry in the "backup" which can not use the backend 
+storage as the serialization point since it may differ from the corresponding entries in the "primary"; as well as applying
+deduplication on events. This primary and backup view may change depending on the conditions to allow for availability.
+Client operations always go to the suffix log and keeper migration/replication will transfer the "total log" from the source 
+to the prefix log at the destination. This allows the clients to freely serve requests by writing to the suffix log even if 
+migration is in progress to that backend. The timing is done such that the client and keeper are guaranteed to not have missing 
+information at the new replica -- clients immediately write to the new replica once their view is refreshed and the keeper's
+wait time ensures this is the case. Of course this would lead to possible overlapping of new operations between the prefix 
+and suffix log (hence their names), but these are easily deduplicable, since we tag each entries with the clock and primary id to
+uniquely identify them. Thanks to these properties idemptotence is achieved on the resolved state of the log, which would be the
+same for any replica. There are rules to guarantee deterministic choices to prevent races such as by comparing the resolved log 
+state of the replicas to select the "primary" in for the serialization order. 
 
-The bin storage backends are just servers started by lab1's serve_back().
+Keepers communicate with each other (through keeper RPCs) to distributed the backends range they manage in a similar way to how 
+bins are mapped to backends. Each keeper also monitors their predecessor's region as well to take over in case it dies while 
+handling a backend event. The keeper view scan is simultaneously a clock sync on backends, and keepers share information to 
+sync all backends. Keepers do replication to maintain 2 copies of data at all time before the next event occurs.
 
-## Tribbler
-The AJAX handling logic is already provided in lab2. These http requests are 
-able to be served by the tribbler front ends by implementing the Server trait. 
-
-In some cases, the tribbler front end uses the BinStorage to appending 
-lists/logs of actions. In other cases, it uses specific keys for a bin as the
-commit point (e.g. signing up).
-
-Here are some main points regarding the design choices:
-1. Users are mapped to the bin whose name is the username for most 
-   operations. This allows a user's own actions to have sequential properties
-   consistent with the sequential requests by the user (not necessarily true
-   or needed for concurrent posts).
-2. The user sign up commit point is also at the user's bin and at a particular
-   known key. This allows easy check of whether the user is signed up.
-3. Registratrion does extra work at a predefined early_registration_bin for up
-   to 20 users. These users can be cached on the frontends avoid repeated calls
-   to this particular bin. A temporary early registration list entry is created 
-   with a commit status of "uncertain" before committing sign up at the commit 
-   point; this is so that if the front end crash here before it can update the 
-   temporary entry commit status, a future evaluation can still look up the 
-   commit point to figure out the true state.
-4. For posts/tribs, a simple per user list (in their bin) is sufficient to
-   meet the requirements, as long as they are sorted by the Tribble Order and
-   appropriately given a logical clock from calling clock() on their bin.
-5. For follow/unfollow actions, a log of these attempted actions is kept per 
-   user. The log is consulted and resolved (e.g. ignore outdated actions and 
-   only evaluate the most recent one) to figure out the final following list of
-   a user. For following logs, the order in the log itself determines the order
-   of events used by the front ends i.e. the backend is used as a serialization
-   point. Thus concurrent follows on the same user for example can be checked by 
-   comparing the state of the log before and after an append to see if that 
-   append was beaten by any races.
-5. There is occasional garbage collection of tribs and follow logs.
-6. There are other design choices not mentioned here and more explanation 
-   on them as well as the ones above and how they should meet the requirements
-   commented on the TribFront struct in the lab/src/lab2/trib_front.rs file if
-   you wish to explore this further.
+## Tribbler front end
+Tribbler uses per user bins for storege operations. It stores user actions mainly in logs and use them as serialization order 
+or encode logical timestamps (such as for tribs) for sorting later on. It holds the bin client described above to 
+do these operations. Lab3's tribbler is largely unchanged from lab2.
