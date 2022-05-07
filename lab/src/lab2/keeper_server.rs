@@ -510,7 +510,7 @@ impl KeeperServer {
                             .await
                         });
 
-                        println!("\n[DEBUGGING] ----------Regular migration WATING 5 SECONDS before starting!-----------\n");
+                        // println!("\n[DEBUGGING] ----------Regular migration WATING 5 SECONDS before starting!-----------\n");
 
                         tokio::time::sleep(KEEPER_WAIT_UPON_EVENT_DETECTION_INTERVAL).await;
 
@@ -546,9 +546,9 @@ impl KeeperServer {
                             };
                         }
 
-                        println!("\n[DEBUGGING] ----------Regular migration started!-----------\n");
-                        println!("event is: {:?}", &event);
-                        println!("live_https is: {:?}", &all_live_back_indices);
+                        // println!("\n[DEBUGGING] ----------Regular migration started!-----------\n");
+                        // println!("event is: {:?}", &event);
+                        // println!("live_https is: {:?}", &all_live_back_indices);
 
                         // TODO call migration event passing in all_live_back_indices, event, and storage_clients_clones
                         match migration_event(
@@ -896,10 +896,10 @@ impl KeeperServer {
 
         // TESTING
         let range = latest_monitoring_range_inclusive.write().await;
-        println!("Our range is: {:?} and our index is: {:?}", range, this);
+        // println!("Our range is: {:?} and our index is: {:?}", range, this);
         drop(range);
         let pre_range = predecessor_monitoring_range_inclusive.read().await;
-        println!("Pre range is: {:?} and our index is: {:?}", pre_range, this);
+        // println!("Pre range is: {:?} and our index is: {:?}", pre_range, this);
         drop(pre_range);
 
         let live_backends_view_clone = live_backends_view.clone();
@@ -1585,10 +1585,10 @@ impl KeeperServer {
         let last_keeper_clock = *keeper_clock_lock;
         drop(keeper_clock_lock);
 
-        println!("\n[DEBUGGING] ----------Take over migration started!-----------\n");
-        println!("event is: {:?}", &back_ev);
-        println!("live_https is: {:?}", &all_live_back_indices);
-        println!("done_keys is: {:?}", &done_keys);
+        // println!("\n[DEBUGGING] ----------Take over migration started!-----------\n");
+        // println!("event is: {:?}", &back_ev);
+        // println!("live_https is: {:?}", &all_live_back_indices);
+        // println!("done_keys is: {:?}", &done_keys);
 
         // TODO Call migration using storage_client_clones, all_live_back_indices, last_keeper_clock, successor_keeper_client, back_ev
         match migration_event(
