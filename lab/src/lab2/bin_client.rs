@@ -160,28 +160,30 @@ impl BinStorage for BinClient {
         let mut rng = rand::thread_rng();
         let rand_idx_in_pool = rng.gen_range(0..NUM_CLIENTS_SHARED_PER_BACKEND);
 
+        // let client_opt_vec = self.client_opt_pools[rand_idx_in_pool].clone(); // cloned vector (which recursively clones Arcs)
+        // let mut storage_client_vec = vec![];
+        // for idx in 0..client_opt_vec.len() {
+        //     storage_client_vec.push(StorageClient::new_with_client_opt(
+        //         &self.http_back_addrs[idx],
+        //         client_opt_vec[idx].clone(),
+        //     ));
+        // }
+        // Ok(Box::new(StorageFaultToleranceClient {
+        //     bin_name: escaped_name.to_string(),
+        //     storage_clients: storage_client_vec,
+        //     live_http_back_addr_idx: Arc::clone(&self.live_back_indices_arc),
+        // }))
+
         let client_opt_vec = self.client_opt_pools[rand_idx_in_pool].clone(); // cloned vector (which recursively clones Arcs)
         let mut storage_client_vec = vec![];
         for idx in 0..client_opt_vec.len() {
-            storage_client_vec.push(StorageClient::new_with_client_opt(
-                &self.http_back_addrs[idx],
-                client_opt_vec[idx].clone(),
-            ));
+            storage_client_vec.push(StorageClient::new(&self.http_back_addrs[idx]));
         }
         Ok(Box::new(StorageFaultToleranceClient {
             bin_name: escaped_name.to_string(),
             storage_clients: storage_client_vec,
             live_http_back_addr_idx: Arc::clone(&self.live_back_indices_arc),
         }))
-
-        // let client_opt = Arc::clone(&self.client_opt_pools[client_idx as usize][rand_idx_in_pool]);
-        // Ok(Box::new(StorageClientMapperWrapper {
-        //     bin_name: escaped_name.to_string(),
-        //     storage_client: Box::new(StorageClient::new_with_client_opt(
-        //         http_back_addr,
-        //         client_opt,
-        //     )),
-        // }))
     }
 }
 
