@@ -204,14 +204,14 @@ async fn test_2_backs_leave_join_leave() -> TribResult<()> {
     tokio::time::sleep(Duration::from_secs(30)).await;
 
     // Shut down server 2
-    println!("IN TEST, SHUTTING DOWN BACK 2 (INDEX 1)");
+    //println!("IN TEST, SHUTTING DOWN BACK 2 (INDEX 1)");
     let _ = shut_tx2.send(()).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Ops should still work
     let r = bin1.list_keys(&pat("", "")).await?.0;
     let r2 = bin2.list_keys(&pat("", "")).await?.0;
-    println!("IN TEST, r len: {}, r2 len: {}", r.len(), r2.len());
+    //println!("IN TEST, r len: {}, r2 len: {}", r.len(), r2.len());
     assert_eq!(2, r.len());
     assert_eq!(3, r2.len());
 
@@ -523,7 +523,7 @@ async fn test_4_backs_shutdown_3() -> TribResult<()> {
     assert_eq!(3, r2.len());
 
     
-    println!("IN TEST, SHUTTING DOWN LAST BACK");
+    //println!("IN TEST, SHUTTING DOWN LAST BACK");
     let _ = shut_tx4.send(()).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -534,7 +534,7 @@ async fn test_4_backs_shutdown_3() -> TribResult<()> {
 
     tokio::time::sleep(Duration::from_secs(30)).await;
 
-    println!("IN TEST, SHUTTING DOWN THIRD BACK");
+    //println!("IN TEST, SHUTTING DOWN THIRD BACK");
     let _ = shut_tx3.send(()).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -545,7 +545,7 @@ async fn test_4_backs_shutdown_3() -> TribResult<()> {
 
     tokio::time::sleep(Duration::from_secs(30)).await;
 
-    println!("IN TEST, SHUTTING DOWN SECOND BACK");
+    //println!("IN TEST, SHUTTING DOWN SECOND BACK");
     let _ = shut_tx2.send(()).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
