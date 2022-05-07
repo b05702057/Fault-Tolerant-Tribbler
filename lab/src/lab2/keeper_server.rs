@@ -892,7 +892,6 @@ impl KeeperServer {
         let range = latest_monitoring_range_inclusive.write().await;
         println!("Our range is: {:?} and our index is: {:?}", range, this);
         drop(range);
-
         let pre_range = predecessor_monitoring_range_inclusive.read().await;
         println!("Pre range is: {:?} and our index is: {:?}", pre_range, this);
         drop(pre_range);
@@ -1193,10 +1192,6 @@ impl KeeperServer {
                     let pre_start_idx = ((idx as i32 - 2) + alive_num) % alive_num;
                     let start_position = (alive_vector[start_idx as usize] + 1) % MAX_BACKEND_NUM;
                     let end_position = end_positions[this];
-                    println!(
-                        "this {:?} start position {:?} end position {:?}",
-                        this, start_position, end_position
-                    );
                     if start_position >= back_num as u64
                         && end_position >= back_num as u64
                         && start_position <= end_position
@@ -1212,10 +1207,6 @@ impl KeeperServer {
                     let pre_start_position =
                         (alive_vector[pre_start_idx as usize] + 1) % MAX_BACKEND_NUM;
                     let pre_end_position = (start_position + MAX_BACKEND_NUM - 1) % MAX_BACKEND_NUM;
-                    println!(
-                        "this {:?} pre start position {:?} pre end position {:?}",
-                        this, pre_start_position, pre_end_position
-                    );
                     if pre_start_position >= back_num as u64
                         && pre_end_position >= back_num as u64
                         && pre_start_position <= pre_end_position
