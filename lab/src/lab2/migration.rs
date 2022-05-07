@@ -107,10 +107,10 @@ async fn migration_join(
     let new_node_idx_in_live_https = lower_bound_in_list(&live_https.clone(), new);
     let succ = live_https[(new_node_idx_in_live_https + 1) % live_https_len as usize];
 
-    println!(
-        "[DEBUGGING] bin_migration: newly joined backend is index {}, successor is back_idx {}",
-        new, succ
-    );
+    // println!(
+    //     "[DEBUGGING] bin_migration: newly joined backend is index {}, successor is back_idx {}",
+    //     new, succ
+    // );
 
     _ = storage_clients[new].clock(last_keeper_clock).await;
 
@@ -364,10 +364,10 @@ async fn bin_migration(
     let list_keys: Vec<String> = list_keys_hs.into_iter().collect();
 
     // Debugging
-    println!(
-        "[DEBUGGING] bin_migration: list keys to migrate are {:?}",
-        &list_keys
-    );
+    // println!(
+    //     "[DEBUGGING] bin_migration: list keys to migrate are {:?}",
+    //     &list_keys
+    // );
 
     for key in list_keys.iter() {
         // Skip the key that has been migrated before
