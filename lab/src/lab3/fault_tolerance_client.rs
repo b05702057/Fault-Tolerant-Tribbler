@@ -551,10 +551,10 @@ impl KeyList for StorageFaultToleranceClient {
         };
         let primary_list = self.get_processed_list(primary, &translated_key).await;
 
-        println!(
-            "[DEBUGGING] list_append: for bin {} for keyvalue {:?}, original (could be swapped) primary idx is {}, backup idx is {:?}",
-            self.bin_name, kv, backend_indices.primary, backend_indices.backup
-        );
+        // println!(
+        //     "[DEBUGGING] list_append: for bin {} for keyvalue {:?}, original (could be swapped) primary idx is {}, backup idx is {:?}",
+        //     self.bin_name, kv, backend_indices.primary, backend_indices.backup
+        // );
 
         // cases:
         // 1. primary and backup and primary as primary
@@ -567,10 +567,10 @@ impl KeyList for StorageFaultToleranceClient {
             Ok(p_list) => {
                 match backup_list {
                     Ok(f_list) => {
-                        println!("[DEBUGGING] list_append: for bin {} both primary and backup are alive (returned result)", self.bin_name);
+                        // println!("[DEBUGGING] list_append: for bin {} both primary and backup are alive (returned result)", self.bin_name);
                         // case 2
                         if p_list.len() < f_list.len() {
-                            println!("[DEBUGGING] list_append: for bin {} swapping primary idx and backup idx", self.bin_name);
+                            // println!("[DEBUGGING] list_append: for bin {} swapping primary idx and backup idx", self.bin_name);
                             match backup {
                                 Some(ret) => {
                                     // swap primary and backup
@@ -601,10 +601,10 @@ impl KeyList for StorageFaultToleranceClient {
                 match backup_list {
                     // case 4
                     Ok(_) => {
-                        println!(
-                            "[DEBUGGING] list_append: for bin {} only backup alive",
-                            self.bin_name
-                        );
+                        // println!(
+                        //     "[DEBUGGING] list_append: for bin {} only backup alive",
+                        //     self.bin_name
+                        // );
                         primary = match backup {
                             Some(storage) => storage,
                             None => {
@@ -742,25 +742,25 @@ impl KeyList for StorageFaultToleranceClient {
         let mut matched_keys: HashSet<String> = HashSet::new();
         let primary = &self.storage_clients[backend_indices.primary];
 
-        println!(
-            "[DEBUGGING] list_keys for bin {} primary idx is {}, backup idx is {:?}",
-            self.bin_name, backend_indices.primary, backend_indices.backup
-        );
+        // println!(
+        //     "[DEBUGGING] list_keys for bin {} primary idx is {}, backup idx is {:?}",
+        //     self.bin_name, backend_indices.primary, backend_indices.backup
+        // );
 
         // Insert all the matching keys in primary and backups to hashset
         // then we don't need to do the comparison since one should be a subset of another or they are the same
         match primary.list_keys(&prefix_translated_pattern).await {
             Ok(List(keys)) => {
-                println!(
-                    "[DEBUGGING] list_keys for bin {} no error when list_keys on primary prefix list",
-                    self.bin_name
-                );
+                // println!(
+                //     "[DEBUGGING] list_keys for bin {} no error when list_keys on primary prefix list",
+                //     self.bin_name
+                // );
 
                 for k in keys.iter() {
-                    println!(
-                        "[DEBUGGING] list_keys for bin {} got list key {} from primary prefix list",
-                        self.bin_name, &k
-                    );
+                    // println!(
+                    //     "[DEBUGGING] list_keys for bin {} got list key {} from primary prefix list",
+                    //     self.bin_name, &k
+                    // );
 
                     let key_split: Vec<&str> = k.split(PREFIX).collect();
                     matched_keys.insert(key_split[1].to_string());
@@ -770,10 +770,10 @@ impl KeyList for StorageFaultToleranceClient {
         }
         match primary.list_keys(&suffix_translated_pattern).await {
             Ok(List(keys)) => {
-                println!(
-                    "[DEBUGGING] list_keys for bin {} no error when list_keys on primary suffix list",
-                    self.bin_name
-                );
+                // println!(
+                //     "[DEBUGGING] list_keys for bin {} no error when list_keys on primary suffix list",
+                //     self.bin_name
+                // );
                 for k in keys.iter() {
                     println!(
                         "[DEBUGGING] list_keys for bin {} got list key {} from primary suffix list",
@@ -791,10 +791,10 @@ impl KeyList for StorageFaultToleranceClient {
                 let backup = &self.storage_clients[index];
                 match backup.list_keys(&prefix_translated_pattern).await {
                     Ok(List(keys)) => {
-                        println!(
-                            "[DEBUGGING] list_keys for bin {} no error when list_keys on backup prefix list",
-                            self.bin_name
-                        );
+                        // println!(
+                        //     "[DEBUGGING] list_keys for bin {} no error when list_keys on backup prefix list",
+                        //     self.bin_name
+                        // );
                         for k in keys.iter() {
                             println!(
                                 "[DEBUGGING] list_keys for bin {} got list key {} from backup prefix list",
@@ -808,10 +808,10 @@ impl KeyList for StorageFaultToleranceClient {
                 }
                 match backup.list_keys(&suffix_translated_pattern).await {
                     Ok(List(keys)) => {
-                        println!(
-                            "[DEBUGGING] list_keys for bin {} no error when list_keys on backup suffix list",
-                            self.bin_name
-                        );
+                        // println!(
+                        //     "[DEBUGGING] list_keys for bin {} no error when list_keys on backup suffix list",
+                        //     self.bin_name
+                        // );
                         for k in keys.iter() {
                             println!(
                                 "[DEBUGGING] list_keys for bin {} got list key {} from primary suffix list",

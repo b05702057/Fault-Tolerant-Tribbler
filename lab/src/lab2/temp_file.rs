@@ -33,14 +33,14 @@ pub struct LiveBackendsView {
     pub live_backend_indices_in_range: Vec<usize>,
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone)]
 pub enum BackendEventType {
     Join,
     Leave,
     None, // Only for RPC to save type.
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BackendEvent {
     pub event_type: BackendEventType,
     pub back_idx: usize,
@@ -56,7 +56,7 @@ pub struct LogEntry {
 
 impl Eq for LogEntry {}
 
-#[derive(PartialEq, Clone, Hash, Debug)]
+#[derive(PartialEq, Clone, Hash)]
 pub struct DoneEntry {
     pub key: String,
     pub key_type: String,
@@ -510,8 +510,6 @@ impl KeeperServer {
                             .await
                         });
 
-                        println!("\n[DEBUGGING] ----------Regular migration WATING 5 SECONDS before starting!-----------\n");
-
                         tokio::time::sleep(KEEPER_WAIT_UPON_EVENT_DETECTION_INTERVAL).await;
 
                         // Note double chaining
@@ -546,18 +544,14 @@ impl KeeperServer {
                             };
                         }
 
-                        println!("\n[DEBUGGING] ----------Regular migration started!-----------\n");
-                        println!("event is: {:?}", &event);
-                        println!("live_https is: {:?}", &all_live_back_indices);
-
                         // TODO call migration event passing in all_live_back_indices, event, and storage_clients_clones
                         match migration_event(
                             &event,
                             all_live_back_indices,
                             storage_clients_clones,
                             None,
-                            global_max_clock,
-                            successor_keeper_client,
+                            // global_max_clock,
+                            // successor_keeper_client,
                         )
                         .await
                         {
@@ -1376,6 +1370,7 @@ impl KeeperServer {
                 }
             }
         }
+
         // finish initialization
         let mut initializing = initializing.write().await;
         *initializing = false;
@@ -1585,19 +1580,14 @@ impl KeeperServer {
         let last_keeper_clock = *keeper_clock_lock;
         drop(keeper_clock_lock);
 
-        println!("\n[DEBUGGING] ----------Take over migration started!-----------\n");
-        println!("event is: {:?}", &back_ev);
-        println!("live_https is: {:?}", &all_live_back_indices);
-        println!("done_keys is: {:?}", &done_keys);
-
         // TODO Call migration using storage_client_clones, all_live_back_indices, last_keeper_clock, successor_keeper_client, back_ev
         match migration_event(
             &back_ev,
             all_live_back_indices,
             clients_for_scanning.clone(),
             Some(done_keys),
-            last_keeper_clock,
-            successor_keeper_client,
+            // last_keeper_clock,
+            // successor_keeper_client,
         )
         .await
         {

@@ -387,10 +387,10 @@ async fn bin_migration(
             Err(_) => return Err("Backend crashed when doing migration".into()),
         };
         for item in prefix_key_list.iter() {
-            println!(
-                "[DEBUGGING] bin_migration: moving item from prefix list with key {:} and value {:?}",
-                key, &item
-            ); // TODO REMOVE TO AVOID EXCESSIVE PRINTING
+            // println!(
+            //     "[DEBUGGING] bin_migration: moving item from prefix list with key {:} and value {:?}",
+            //     key, &item
+            // ); // TODO REMOVE TO AVOID EXCESSIVE PRINTING
             match to
                 .list_append(&KeyValue {
                     key: format!("{}{}", PREFIX, key),
@@ -409,10 +409,10 @@ async fn bin_migration(
             Err(_) => return Err("Backend crashed when doing migration".into()),
         };
         for item in suffix_key_list.iter() {
-            println!(
-                "[DEBUGGING] bin_migration: moving item from suffix list with key {:} and value {:?}",
-                key, &item
-            ); // TODO REMOVE TO AVOID EXCESSIVE PRINTING
+            // println!(
+            //     "[DEBUGGING] bin_migration: moving item from suffix list with key {:} and value {:?}",
+            //     key, &item
+            // ); // TODO REMOVE TO AVOID EXCESSIVE PRINTING
             match to
                 .list_append(&KeyValue {
                     key: format!("{}{}", PREFIX, key),
