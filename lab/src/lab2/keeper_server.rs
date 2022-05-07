@@ -510,6 +510,8 @@ impl KeeperServer {
                             .await
                         });
 
+                        println!("\n[DEBUGGING] ----------Regular migration WATING 5 SECONDS before starting!-----------\n");
+
                         tokio::time::sleep(KEEPER_WAIT_UPON_EVENT_DETECTION_INTERVAL).await;
 
                         // Note double chaining

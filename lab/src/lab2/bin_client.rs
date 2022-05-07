@@ -156,21 +156,16 @@ impl BinStorage for BinClient {
         // with colons anyway.
         let escaped_name = colon::escape(name);
 
-        let mut hasher = DefaultHasher::new();
-        escaped_name.hash(&mut hasher);
-        let client_idx = hasher.finish() % self.http_back_addrs.len() as u64;
-        let http_back_addr = &self.http_back_addrs[client_idx as usize];
-
         // Random pool index, where index points to a list of clients for all backends.
         let mut rng = rand::thread_rng();
         let rand_idx_in_pool = rng.gen_range(0..NUM_CLIENTS_SHARED_PER_BACKEND);
 
         let client_opt_vec = self.client_opt_pools[rand_idx_in_pool].clone(); // cloned vector (which recursively clones Arcs)
         let mut storage_client_vec = vec![];
-        for client_opt in client_opt_vec {
+        for idx in 0..client_opt_vec.len() {
             storage_client_vec.push(StorageClient::new_with_client_opt(
-                http_back_addr,
-                client_opt,
+                &self.http_back_addrs[idx],
+                client_opt_vec[idx].clone(),
             ));
         }
         Ok(Box::new(StorageFaultToleranceClient {
