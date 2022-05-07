@@ -220,7 +220,7 @@ async fn migration_crash(
     // Move all the data in bin which is hashed into the range (id of node before predecessor, id of predecessor] to crashed node's successor
     for bin in pred_bins.iter() {
         let idx = hash_bin_name_to_backend_idx(bin, &live_https, storage_clients.len()).await?;
-        if check_in_bound_wrap_around_inclusive((prev_pred + 1) % storage_clients.len(), pred, idx)
+        if check_in_bound_wrap_around_inclusive((prev_pred + 1) % storage_clients.len(), succ, idx)
         {
             match bin_migration(
                 bin,
@@ -240,7 +240,7 @@ async fn migration_crash(
     // Move all the data in bin which is hashed into the range (id of predecessor, crashed_node] to the node succeed crashed node's successor
     for bin in succ_bins.iter() {
         let idx = hash_bin_name_to_backend_idx(bin, &live_https, storage_clients.len()).await?;
-        if check_in_bound_wrap_around_inclusive((pred + 1) % storage_clients.len(), crashed, idx) {
+        if check_in_bound_wrap_around_inclusive((pred + 1) % storage_clients.len(), succ, idx) {
             match bin_migration(
                 bin,
                 storage_clients[succ].clone(),
