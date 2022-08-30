@@ -13,4 +13,3 @@ when old servers crash, and migrating data to recovered servers for load balanci
 ### Note
 * Rust can be downloaded here: https://rustup.rs.
 * The detailed tasks are recorded here: https://cseweb.ucsd.edu/classes/sp22/cse223B-a/tribbler/lab/lab3/index.html.
-
